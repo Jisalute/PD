@@ -121,6 +121,7 @@ TABLE_STATEMENTS = [
 		address VARCHAR(255),
 		contact_person VARCHAR(64),
 		contact_phone VARCHAR(32),
+		contact_address VARCHAR(255) COMMENT '联系人地址',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -128,20 +129,35 @@ TABLE_STATEMENTS = [
 	"""
 	CREATE TABLE IF NOT EXISTS pd_deliveries (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
-		shipper VARCHAR(64),
-		payee VARCHAR(64),
-		other_fees DECIMAL(14, 2),
-		report_date DATE,
-		driver_phone VARCHAR(32),
-		driver_name VARCHAR(64),
-		vehicle_no VARCHAR(32),
-		product_name VARCHAR(64),
-		contract_no VARCHAR(64),
+		report_date DATE COMMENT '报货日期',
+		delivery_time DATETIME COMMENT '送货时间',
+		warehouse VARCHAR(64) COMMENT '送货库房',
+		target_factory_id BIGINT COMMENT '目标工厂ID（关联pd_customers）',
+		target_factory_name VARCHAR(128) COMMENT '目标工厂名称',
+		product_name VARCHAR(64) COMMENT '货物品种',
+		quantity DECIMAL(12, 3) COMMENT '数量（吨）',
+		vehicle_no VARCHAR(32) COMMENT '车牌号',
+		driver_name VARCHAR(64) COMMENT '司机姓名',
+		driver_phone VARCHAR(32) COMMENT '司机电话',
+		driver_id_card VARCHAR(18) COMMENT '司机身份证号',
+		has_delivery_order ENUM('有', '无') DEFAULT '无' COMMENT '是否有联单',
+		delivery_order_image VARCHAR(255) COMMENT '联单图片路径',
+		source_type ENUM('司机', '公司') DEFAULT '公司' COMMENT '来源：司机/公司',
+		shipper VARCHAR(64) COMMENT '发货人（默认操作人）',
+		payee VARCHAR(64) COMMENT '收款人',
+		service_fee DECIMAL(14, 2) DEFAULT 0 COMMENT '服务费',
+		contract_no VARCHAR(64) COMMENT '关联合同编号',
+		contract_unit_price DECIMAL(12, 2) COMMENT '合同单价',
+		total_amount DECIMAL(14, 2) COMMENT '总价（单价×数量）',
+		status VARCHAR(32) DEFAULT '待确认' COMMENT '状态：待确认/已确认/已完成/已取消',
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-		INDEX idx_deliveries_report_date (report_date),
-		INDEX idx_deliveries_contract_no (contract_no)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+		INDEX idx_report_date (report_date),
+		INDEX idx_contract_no (contract_no),
+		INDEX idx_target_factory (target_factory_id),
+		INDEX idx_vehicle_no (vehicle_no),
+		INDEX idx_status (status)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='销售台账/报货订单';
 	""",
 	"""
 	CREATE TABLE IF NOT EXISTS pd_weighbills (
