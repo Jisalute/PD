@@ -1,4 +1,12 @@
 from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from pathlib import Path
+import sys
+import uvicorn
+
+# 确保能导入 database_setup
+sys.path.append(str(Path(__file__).parent))
+from database_setup import create_tables
 from app.api.v1.api import api_router
 from app.core.config import settings
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +15,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.user.routes import register_routes as register_user_routes
 
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理 - 启动时初始化数据库"""
+    print("正在检查数据库初始化...")
+    try:
+        create_tables()
+        print("数据库初始化完成")
+    except Exception as e:
+        print(f"数据库初始化失败: {e}")
+    yield
+    print("应用关闭")
+
+
+app = FastAPI(
+    title=settings.app_name,
+    version="0.1.0",
+    lifespan=lifespan
+)
 app = FastAPI(
     title="综合管理系统API",
     description="财务管理系统 + 用户中心 + 订单系统 + 商品管理",
@@ -23,3 +50,17 @@ register_user_routes(app)
 @app.get("/healthz")
 def health_check() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/init-db")
+def manual_init_db():
+    """手动触发数据库初始化（调试用）"""
+    try:
+        create_tables()
+        return {"success": True, "message": "数据库初始化完成"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
