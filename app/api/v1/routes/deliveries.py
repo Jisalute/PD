@@ -145,9 +145,12 @@ async def create_delivery(
 
 @router.get("/", response_model=dict)
 async def list_deliveries(
-        keyword: Optional[str] = Query(None, description="关键词搜索"),
-        factory_name: Optional[str] = Query(None, description="目标工厂"),
-        status: Optional[str] = Query(None, description="状态"),
+    exact_factory_name: Optional[str] = Query(None, description="精确目标工厂"),
+    exact_status: Optional[str] = Query(None, description="精确状态"),
+    exact_vehicle_no: Optional[str] = Query(None, description="精确车牌号"),
+    exact_driver_name: Optional[str] = Query(None, description="精确司机姓名"),
+    exact_driver_phone: Optional[str] = Query(None, description="精确司机电话"),
+    fuzzy_keywords: Optional[str] = Query(None, description="模糊关键词（空格分隔）"),
         date_from: Optional[str] = Query(None, description="开始日期"),
         date_to: Optional[str] = Query(None, description="结束日期"),
         page: int = Query(1, ge=1),
@@ -156,9 +159,12 @@ async def list_deliveries(
 ):
     """查询报货订单列表"""
     return service.list_deliveries(
-        keyword=keyword,
-        factory_name=factory_name,
-        status=status,
+    exact_factory_name=exact_factory_name,
+    exact_status=exact_status,
+    exact_vehicle_no=exact_vehicle_no,
+    exact_driver_name=exact_driver_name,
+    exact_driver_phone=exact_driver_phone,
+    fuzzy_keywords=fuzzy_keywords,
         date_from=date_from,
         date_to=date_to,
         page=page,

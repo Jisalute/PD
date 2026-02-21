@@ -85,7 +85,7 @@ router = APIRouter(tags=["PD用户认证"])
 
 def register_pd_auth_routes(app):
     """注册用户认证路由到主应用"""
-    app.include_router(router, prefix="/api/v1")
+    app.include_router(router, prefix="/api/v1/user")
 
 
 def _err(msg: str, code: int = 400):

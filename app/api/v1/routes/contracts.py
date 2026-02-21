@@ -100,7 +100,7 @@ class ContractOut(BaseModel):
 @router.post("/ocr", response_model=ContractOCRResponse)
 async def ocr_recognize(
     file: UploadFile = File(..., description="合同图片"),
-    auto_save: bool = Query(False, description="是否自动保存（默认false，OCR可能不完整）"),
+    auto_save: bool = Query(True, description="是否自动保存（默认true，OCR可能不完整）"),
     save_image: bool = Query(False, description="是否保存图片"),
     service: ContractService = Depends(get_contract_service)
 ):
@@ -144,7 +144,7 @@ async def ocr_recognize(
             os.remove(temp_path)
 
         # 自动保存逻辑
-        if auto_save and contract_no and data.get("products"):
+        if auto_save and contract_no:
             existing = service.get_contract_detail_by_no(contract_no)
             if existing:
                 data["saved_to_db"] = False
@@ -174,16 +174,19 @@ async def ocr_recognize(
                 if result_db["success"]:
                     data["saved_to_db"] = True
                     data["contract_id"] = result_db["data"]["id"]
-                    data["db_message"] = "合同已自动保存"
+                    if data.get("products"):
+                        data["db_message"] = "合同已自动保存"
+                    else:
+                        data["db_message"] = "合同已保存，但品种信息为空"
                 else:
                     data["saved_to_db"] = False
                     data["db_message"] = f"保存失败: {result_db.get('error')}"
+                    if result_db.get("existing_id"):
+                        data["contract_id"] = result_db["existing_id"]
         else:
             data["saved_to_db"] = False
             if not contract_no:
                 data["db_message"] = "未识别到合同编号，请手动填写后保存"
-            elif not data.get("products"):
-                data["db_message"] = "未识别到品种信息，请手动填写后保存"
             else:
                 data["db_message"] = "OCR结果不完整，请检查并补充后手动保存"
 
@@ -249,12 +252,23 @@ async def create_manual(
 
 @router.get("/", response_model=dict)
 async def list_contracts(
+    exact_contract_no: Optional[str] = Query(None, description="精确合同编号"),
+    exact_smelter_company: Optional[str] = Query(None, description="精确冶炼厂"),
+    exact_status: Optional[str] = Query(None, description="精确状态"),
+    fuzzy_keywords: Optional[str] = Query(None, description="模糊关键词（空格分隔）"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     service: ContractService = Depends(get_contract_service)
 ):
     """获取合同列表（分页）"""
-    return service.list_contracts(page, page_size)
+    return service.list_contracts(
+        page,
+        page_size,
+        exact_contract_no,
+        exact_smelter_company,
+        exact_status,
+        fuzzy_keywords,
+    )
 
 
 @router.get("/{contract_id}", response_model=ContractOut)

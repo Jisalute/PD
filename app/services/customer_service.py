@@ -140,7 +140,10 @@ class CustomerService:
 
     def list_customers(
             self,
-            keyword: Optional[str] = None,
+            exact_smelter_name: Optional[str] = None,
+            exact_contact_person: Optional[str] = None,
+            exact_contact_phone: Optional[str] = None,
+            fuzzy_keywords: Optional[str] = None,
             page: int = 1,
             page_size: int = 20
     ) -> Dict[str, Any]:
@@ -148,18 +151,33 @@ class CustomerService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # 构建查询条件
-                    where_clause = ""
+                    where_clauses = []
                     params = []
 
-                    if keyword:
-                        where_clause = """
-                            WHERE smelter_name LIKE %s 
-                            OR contact_person LIKE %s 
-                            OR contact_phone LIKE %s
-                        """
-                        like_keyword = f"%{keyword}%"
-                        params = [like_keyword, like_keyword, like_keyword]
+                    if exact_smelter_name:
+                        where_clauses.append("smelter_name = %s")
+                        params.append(exact_smelter_name)
+                    if exact_contact_person:
+                        where_clauses.append("contact_person = %s")
+                        params.append(exact_contact_person)
+                    if exact_contact_phone:
+                        where_clauses.append("contact_phone = %s")
+                        params.append(exact_contact_phone)
+
+                    if fuzzy_keywords:
+                        tokens = [t for t in fuzzy_keywords.split() if t]
+                        or_clauses = []
+                        for token in tokens:
+                            like = f"%{token}%"
+                            or_clauses.append(
+                                "(smelter_name LIKE %s OR contact_person LIKE %s OR contact_phone LIKE %s "
+                                "OR address LIKE %s OR contact_address LIKE %s)"
+                            )
+                            params.extend([like, like, like, like, like])
+                        if or_clauses:
+                            where_clauses.append("(" + " OR ".join(or_clauses) + ")")
+
+                    where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
                     # 总数
                     count_sql = f"SELECT COUNT(*) FROM pd_customers {where_clause}"

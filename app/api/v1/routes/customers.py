@@ -73,13 +73,23 @@ async def create_customer(
 
 @router.get("/", response_model=dict)
 async def list_customers(
-        keyword: Optional[str] = Query(None, description="搜索关键词（名称/联系人/电话）"),
+        exact_smelter_name: Optional[str] = Query(None, description="精确冶炼厂名称"),
+        exact_contact_person: Optional[str] = Query(None, description="精确联系人"),
+        exact_contact_phone: Optional[str] = Query(None, description="精确联系电话"),
+        fuzzy_keywords: Optional[str] = Query(None, description="模糊关键词（空格分隔）"),
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         service: CustomerService = Depends(get_customer_service)
 ):
     """查询客户列表（支持搜索）"""
-    return service.list_customers(keyword=keyword, page=page, page_size=page_size)
+    return service.list_customers(
+        exact_smelter_name=exact_smelter_name,
+        exact_contact_person=exact_contact_person,
+        exact_contact_phone=exact_contact_phone,
+        fuzzy_keywords=fuzzy_keywords,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/{customer_id}", response_model=CustomerOut)

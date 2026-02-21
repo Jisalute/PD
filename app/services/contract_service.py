@@ -247,15 +247,90 @@ class ContractService:
         return None
 
     def _infer_end_date(self, start_date: Optional[str]) -> Optional[str]:
-        """根据签订日期推断截止日期（默认1年）"""
+        """根据签订日期推断截止日期（默认5天）"""
         if not start_date:
             return None
         try:
             start = datetime.strptime(start_date, "%Y-%m-%d")
-            end = start + timedelta(days=365)
+            end = start + timedelta(days=5)
             return end.strftime("%Y-%m-%d")
         except:
             return None
+
+    def _compute_end_date(self, contract_date: Optional[str]) -> Optional[str]:
+        if not contract_date:
+            return None
+
+        if isinstance(contract_date, date):
+            base = contract_date
+        else:
+            base = datetime.strptime(str(contract_date), "%Y-%m-%d").date()
+
+        return (base + timedelta(days=5)).strftime("%Y-%m-%d")
+
+    def _normalize_products(self, products: List[Dict]) -> List[tuple]:
+        normalized = []
+        for product in products or []:
+            name = (product.get("product_name") or "").strip()
+            if not name:
+                continue
+            price = product.get("unit_price")
+            if price is None or price == "":
+                price_val = None
+            else:
+                price_val = str(Decimal(str(price)).quantize(Decimal("0.01")))
+            normalized.append((name, price_val))
+        normalized.sort()
+        return normalized
+
+    def _find_duplicate_contract(self, data: Dict, products: List[Dict]) -> Optional[int]:
+        fields = [
+            "contract_date",
+            "end_date",
+            "smelter_company",
+            "total_quantity",
+            "arrival_payment_ratio",
+            "final_payment_ratio",
+            "status",
+            "remarks",
+        ]
+        conditions = []
+        params = []
+        for field in fields:
+            value = data.get(field)
+            conditions.append(f"(({field} = %s) OR ({field} IS NULL AND %s IS NULL))")
+            params.extend([value, value])
+
+        where_sql = " AND ".join(conditions)
+        target_products = self._normalize_products(products)
+
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT id FROM pd_contracts WHERE {where_sql}",
+                        tuple(params),
+                    )
+                    for row in cur.fetchall():
+                        contract_id = row[0]
+                        cur.execute(
+                            """
+                            SELECT product_name, unit_price
+                            FROM pd_contract_products
+                            WHERE contract_id = %s
+                            ORDER BY product_name, unit_price
+                            """,
+                            (contract_id,),
+                        )
+                        existing_products = [
+                            {"product_name": r[0], "unit_price": r[1]} for r in cur.fetchall()
+                        ]
+                        if self._normalize_products(existing_products) == target_products:
+                            return contract_id
+        except Exception as e:
+            logger.error(f"合同查重失败: {e}")
+
+        return None
 
     def _extract_smelter(self, text: str) -> Optional[str]:
         """提取冶炼公司"""
@@ -366,6 +441,15 @@ class ContractService:
     def create_contract(self, data: Dict, products: List[Dict]) -> Dict[str, Any]:
         """创建合同（包含品种明细）"""
         try:
+            if data.get("contract_date"):
+                data["end_date"] = self._compute_end_date(data.get("contract_date"))
+            duplicate_id = self._find_duplicate_contract(data, products)
+            if duplicate_id:
+                return {
+                    "success": False,
+                    "error": "合同信息已存在",
+                    "existing_id": duplicate_id,
+                }
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT id FROM pd_contracts WHERE contract_no = %s", (data.get("contract_no"),))
@@ -423,6 +507,14 @@ class ContractService:
                     cur.execute("SELECT id FROM pd_contracts WHERE id = %s", (contract_id,))
                     if not cur.fetchone():
                         return {"success": False, "error": f"合同ID {contract_id} 不存在"}
+
+                    if data.get("contract_date"):
+                        data["end_date"] = self._compute_end_date(data.get("contract_date"))
+                    elif "end_date" in data:
+                        cur.execute("SELECT contract_date FROM pd_contracts WHERE id = %s", (contract_id,))
+                        row = cur.fetchone()
+                        if row:
+                            data["end_date"] = self._compute_end_date(row[0])
 
                     update_fields = []
                     params = []
@@ -514,22 +606,60 @@ class ContractService:
         except:
             return None
 
-    def list_contracts(self, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+    def list_contracts(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        exact_contract_no: Optional[str] = None,
+        exact_smelter_company: Optional[str] = None,
+        exact_status: Optional[str] = None,
+        fuzzy_keywords: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """获取合同列表（分页）"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM pd_contracts")
+                    where_clauses = []
+                    params = []
+
+                    if exact_contract_no:
+                        where_clauses.append("c.contract_no = %s")
+                        params.append(exact_contract_no)
+                    if exact_smelter_company:
+                        where_clauses.append("c.smelter_company = %s")
+                        params.append(exact_smelter_company)
+                    if exact_status:
+                        where_clauses.append("c.status = %s")
+                        params.append(exact_status)
+
+                    if fuzzy_keywords:
+                        tokens = [t for t in fuzzy_keywords.split() if t]
+                        or_clauses = []
+                        for token in tokens:
+                            like = f"%{token}%"
+                            or_clauses.append(
+                                "(c.contract_no LIKE %s OR c.smelter_company LIKE %s OR c.remarks LIKE %s "
+                                "OR EXISTS (SELECT 1 FROM pd_contract_products p WHERE p.contract_id = c.id "
+                                "AND p.product_name LIKE %s))"
+                            )
+                            params.extend([like, like, like, like])
+                        if or_clauses:
+                            where_clauses.append("(" + " OR ".join(or_clauses) + ")")
+
+                    where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+                    cur.execute(f"SELECT COUNT(*) FROM pd_contracts c {where_sql}", tuple(params))
                     total = cur.fetchone()[0]
 
                     offset = (page - 1) * page_size
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT c.*, 
                                (SELECT COUNT(*) FROM pd_contract_products WHERE contract_id = c.id) as product_count
                         FROM pd_contracts c
+                        {where_sql}
                         ORDER BY c.seq_no DESC, c.created_at DESC
                         LIMIT %s OFFSET %s
-                    """, (page_size, offset))
+                    """, tuple(params + [page_size, offset]))
 
                     columns = [desc[0] for desc in cur.description]
                     rows = cur.fetchall()
@@ -588,6 +718,27 @@ class ContractService:
 
 
 _contract_service = None
+
+
+def expire_contracts_after_grace(grace_days: int = 5) -> int:
+    """合同生效后超过指定天数自动失效"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE pd_contracts
+                    SET status = '已失效'
+                    WHERE status = '生效中'
+                      AND contract_date IS NOT NULL
+                      AND DATE_ADD(contract_date, INTERVAL %s DAY) <= CURDATE()
+                    """,
+                    (grace_days,),
+                )
+                return cur.rowcount
+    except Exception as e:
+        logger.error(f"合同自动失效失败: {e}")
+        return 0
 
 def get_contract_service():
     global _contract_service

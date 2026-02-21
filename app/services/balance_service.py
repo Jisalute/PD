@@ -540,8 +540,9 @@ class BalanceService:
             return None
 
     def list_balance_details(self,
-                             contract_no: str = None,
-                             driver_name: str = None,
+                             exact_contract_no: str = None,
+                             exact_driver_name: str = None,
+                             fuzzy_keywords: str = None,
                              payment_status: int = None,
                              page: int = 1,
                              page_size: int = 20) -> Dict[str, Any]:
@@ -552,12 +553,23 @@ class BalanceService:
                     conditions = ["1=1"]
                     params = []
 
-                    if contract_no:
+                    if exact_contract_no:
                         conditions.append("contract_no = %s")
-                        params.append(contract_no)
-                    if driver_name:
-                        conditions.append("driver_name LIKE %s")
-                        params.append(f"%{driver_name}%")
+                        params.append(exact_contract_no)
+                    if exact_driver_name:
+                        conditions.append("driver_name = %s")
+                        params.append(exact_driver_name)
+                    if fuzzy_keywords:
+                        tokens = [t for t in fuzzy_keywords.split() if t]
+                        or_clauses = []
+                        for token in tokens:
+                            like = f"%{token}%"
+                            or_clauses.append(
+                                "(contract_no LIKE %s OR driver_name LIKE %s OR driver_phone LIKE %s OR vehicle_no LIKE %s)"
+                            )
+                            params.extend([like, like, like, like])
+                        if or_clauses:
+                            conditions.append("(" + " OR ".join(or_clauses) + ")")
                     if payment_status is not None:
                         conditions.append("payment_status = %s")
                         params.append(payment_status)

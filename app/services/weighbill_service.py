@@ -515,17 +515,58 @@ class WeighbillService:
             logger.error(f"查询磅单失败: {e}")
             return None
 
-    def list_weighbills(self, status: str = None, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+    def list_weighbills(
+        self,
+        exact_status: Optional[str] = None,
+        exact_vehicle_no: Optional[str] = None,
+        exact_contract_no: Optional[str] = None,
+        fuzzy_keywords: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
         """查询磅单列表"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    where = "WHERE 1=1"
+                    where_clauses = ["1=1"]
                     params = []
 
-                    if status:
-                        where += " AND ocr_status = %s"
-                        params.append(status)
+                    if exact_status:
+                        where_clauses.append("ocr_status = %s")
+                        params.append(exact_status)
+
+                    if exact_vehicle_no:
+                        where_clauses.append("vehicle_no = %s")
+                        params.append(exact_vehicle_no)
+
+                    if exact_contract_no:
+                        where_clauses.append("contract_no = %s")
+                        params.append(exact_contract_no)
+
+                    if date_from:
+                        where_clauses.append("weigh_date >= %s")
+                        params.append(date_from)
+
+                    if date_to:
+                        where_clauses.append("weigh_date <= %s")
+                        params.append(date_to)
+
+                    if fuzzy_keywords:
+                        tokens = [t for t in fuzzy_keywords.split() if t]
+                        or_clauses = []
+                        for token in tokens:
+                            like = f"%{token}%"
+                            or_clauses.append(
+                                "(contract_no LIKE %s OR vehicle_no LIKE %s OR product_name LIKE %s "
+                                "OR weigh_ticket_no LIKE %s)"
+                            )
+                            params.extend([like, like, like, like])
+                        if or_clauses:
+                            where_clauses.append("(" + " OR ".join(or_clauses) + ")")
+
+                    where = "WHERE " + " AND ".join(where_clauses)
 
                     # 总数
                     cur.execute(f"SELECT COUNT(*) FROM pd_weighbills {where}", tuple(params))

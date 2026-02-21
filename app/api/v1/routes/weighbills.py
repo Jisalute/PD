@@ -282,9 +282,10 @@ async def update_weighbill(
 
 @router.get("/", response_model=dict)
 async def list_weighbills(
-        status: Optional[str] = Query(None, description="状态筛选：待确认/已确认/已修正"),
-        vehicle_no: Optional[str] = Query(None, description="车牌号筛选"),
-        contract_no: Optional[str] = Query(None, description="合同编号筛选"),
+    exact_status: Optional[str] = Query(None, description="精确状态：待确认/已确认/已修正"),
+    exact_vehicle_no: Optional[str] = Query(None, description="精确车牌号"),
+    exact_contract_no: Optional[str] = Query(None, description="精确合同编号"),
+    fuzzy_keywords: Optional[str] = Query(None, description="模糊关键词（空格分隔）"),
         date_from: Optional[str] = Query(None, description="开始日期"),
         date_to: Optional[str] = Query(None, description="结束日期"),
         page: int = Query(1, ge=1),
@@ -298,17 +299,30 @@ async def list_weighbills(
                 where_clauses = ["1=1"]
                 params = []
 
-                if status:
+                if exact_status:
                     where_clauses.append("ocr_status = %s")
-                    params.append(status)
+                    params.append(exact_status)
 
-                if vehicle_no:
-                    where_clauses.append("vehicle_no LIKE %s")
-                    params.append(f"%{vehicle_no}%")
+                if exact_vehicle_no:
+                    where_clauses.append("vehicle_no = %s")
+                    params.append(exact_vehicle_no)
 
-                if contract_no:
+                if exact_contract_no:
                     where_clauses.append("contract_no = %s")
-                    params.append(contract_no)
+                    params.append(exact_contract_no)
+
+                if fuzzy_keywords:
+                    tokens = [t for t in fuzzy_keywords.split() if t]
+                    or_clauses = []
+                    for token in tokens:
+                        like = f"%{token}%"
+                        or_clauses.append(
+                            "(contract_no LIKE %s OR vehicle_no LIKE %s OR product_name LIKE %s "
+                            "OR weigh_ticket_no LIKE %s)"
+                        )
+                        params.extend([like, like, like, like])
+                    if or_clauses:
+                        where_clauses.append("(" + " OR ".join(or_clauses) + ")")
 
                 if date_from:
                     where_clauses.append("weigh_date >= %s")

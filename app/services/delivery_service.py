@@ -277,9 +277,12 @@ class DeliveryService:
 
     def list_deliveries(
             self,
-            keyword: str = None,
-            factory_name: str = None,
-            status: str = None,
+            exact_factory_name: str = None,
+            exact_status: str = None,
+            exact_vehicle_no: str = None,
+            exact_driver_name: str = None,
+            exact_driver_phone: str = None,
+            fuzzy_keywords: str = None,
             date_from: str = None,
             date_to: str = None,
             page: int = 1,
@@ -292,18 +295,38 @@ class DeliveryService:
                     where_clauses = []
                     params = []
 
-                    if keyword:
-                        where_clauses.append("(vehicle_no LIKE %s OR driver_name LIKE %s OR driver_phone LIKE %s)")
-                        like = f"%{keyword}%"
-                        params.extend([like, like, like])
-
-                    if factory_name:
+                    if exact_factory_name:
                         where_clauses.append("target_factory_name = %s")
-                        params.append(factory_name)
+                        params.append(exact_factory_name)
 
-                    if status:
+                    if exact_status:
                         where_clauses.append("status = %s")
-                        params.append(status)
+                        params.append(exact_status)
+
+                    if exact_vehicle_no:
+                        where_clauses.append("vehicle_no = %s")
+                        params.append(exact_vehicle_no)
+
+                    if exact_driver_name:
+                        where_clauses.append("driver_name = %s")
+                        params.append(exact_driver_name)
+
+                    if exact_driver_phone:
+                        where_clauses.append("driver_phone = %s")
+                        params.append(exact_driver_phone)
+
+                    if fuzzy_keywords:
+                        tokens = [t for t in fuzzy_keywords.split() if t]
+                        or_clauses = []
+                        for token in tokens:
+                            like = f"%{token}%"
+                            or_clauses.append(
+                                "(vehicle_no LIKE %s OR driver_name LIKE %s OR driver_phone LIKE %s "
+                                "OR target_factory_name LIKE %s OR product_name LIKE %s)"
+                            )
+                            params.extend([like, like, like, like, like])
+                        if or_clauses:
+                            where_clauses.append("(" + " OR ".join(or_clauses) + ")")
 
                     if date_from:
                         where_clauses.append("report_date >= %s")

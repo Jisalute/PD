@@ -87,15 +87,23 @@ async def generate_balance(
 
 @router.get("/", response_model=dict)
 async def list_balances(
-        contract_no: Optional[str] = Query(None),
-        driver_name: Optional[str] = Query(None),
+        exact_contract_no: Optional[str] = Query(None, description="精确合同编号"),
+        exact_driver_name: Optional[str] = Query(None, description="精确司机姓名"),
+        fuzzy_keywords: Optional[str] = Query(None, description="模糊关键词（空格分隔）"),
         payment_status: Optional[int] = Query(None, description="0=待支付, 1=部分支付, 2=已结清"),
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         service: BalanceService = Depends(get_balance_service)
 ):
     """查询结余明细列表"""
-    return service.list_balance_details(contract_no, driver_name, payment_status, page, page_size)
+    return service.list_balance_details(
+        exact_contract_no,
+        exact_driver_name,
+        fuzzy_keywords,
+        payment_status,
+        page,
+        page_size,
+    )
 
 
 @router.get("/{balance_id}", response_model=BalanceOut)
