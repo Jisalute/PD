@@ -69,51 +69,66 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 - 公网文档地址: http://8.136.35.215:8007/docs
 - 内网文档地址: http://172.30.147.217:8007/docs
 
-## API 概览
+## API 详细说明
 
 通用：
-- GET /healthz
-- GET /init-db
+- GET /healthz: 健康检查，返回服务状态。
+- GET /init-db: 手动触发数据库初始化（调试用，生产环境不建议开放）。
 
 认证：
-- POST /api/v1/auth/login
+- POST /api/v1/auth/login: 登录并签发 JWT（当前未校验账号密码，见安全说明）。
+
+用户与权限（PD 用户体系）：
+- POST /api/v1/user/auth/login: 用户登录，校验账号密码并返回 JWT。
+- POST /api/v1/user/auth/logout: 用户登出（前端清除 token）。
+- POST /api/v1/user/auth/refresh: 刷新访问令牌。
+- GET /api/v1/user/me: 获取当前登录用户信息。
+- PUT /api/v1/user/me: 更新当前用户资料（不含角色）。
+- PUT /api/v1/user/me/password: 修改当前用户密码。
+- POST /api/v1/user/users: 创建用户（管理员/大区经理权限）。
+- GET /api/v1/user/users: 用户列表（分页/筛选，管理员/大区经理权限）。
+- GET /api/v1/user/users/{user_id}: 用户详情。
+- PUT /api/v1/user/users/{user_id}: 更新用户信息。
+- DELETE /api/v1/user/users/{user_id}: 删除用户（软删除）。
+- POST /api/v1/user/users/{user_id}/reset-password: 管理员重置用户密码。
 
 合同管理：
-- POST /api/v1/contracts/ocr
-- POST /api/v1/contracts/manual
-- GET /api/v1/contracts
-- GET /api/v1/contracts/{contract_id}
-- PUT /api/v1/contracts/{contract_id}
-- DELETE /api/v1/contracts/{contract_id}
-- POST /api/v1/contracts/export
+- POST /api/v1/contracts/ocr: 上传合同图片，OCR 识别合同信息，可选择自动保存与图片落盘。
+- POST /api/v1/contracts/manual: 手动录入合同（含品种与单价明细）。
+- GET /api/v1/contracts: 分页查询合同列表，支持精确条件与模糊关键词。
+- GET /api/v1/contracts/{contract_id}: 查询合同详情（含品种明细）。
+- PUT /api/v1/contracts/{contract_id}: 更新合同与品种明细。
+- DELETE /api/v1/contracts/{contract_id}: 删除合同。
+- POST /api/v1/contracts/export: 导出合同数据（CSV 文件下载，传合同ID列表为空则导出全部）。
 
 客户管理：
-- POST /api/v1/customers
-- GET /api/v1/customers
-- GET /api/v1/customers/{customer_id}
-- PUT /api/v1/customers/{customer_id}
-- DELETE /api/v1/customers/{customer_id}
+- POST /api/v1/customers: 创建客户。
+- GET /api/v1/customers: 查询客户列表。
+- GET /api/v1/customers/{customer_id}: 查询客户详情。
+- PUT /api/v1/customers/{customer_id}: 更新客户信息。
+- DELETE /api/v1/customers/{customer_id}: 删除客户。
 
 销售台账/报货订单：
-- POST /api/v1/deliveries
-- GET /api/v1/deliveries
-- GET /api/v1/deliveries/{delivery_id}
-- PUT /api/v1/deliveries/{delivery_id}
-- DELETE /api/v1/deliveries/{delivery_id}
-- POST /api/v1/deliveries/{delivery_id}/upload-order
+- POST /api/v1/deliveries: 新增报货订单/销售台账记录。
+- GET /api/v1/deliveries: 查询报货订单列表。
+- GET /api/v1/deliveries/{delivery_id}: 查询单条报货订单。
+- PUT /api/v1/deliveries/{delivery_id}: 更新报货订单。
+- DELETE /api/v1/deliveries/{delivery_id}: 删除报货订单。
+- POST /api/v1/deliveries/{delivery_id}/upload-order: 上传报货单附件。
 
 磅单管理：
-- POST /api/v1/weighbills/ocr
-- POST /api/v1/weighbills
-- GET /api/v1/weighbills
-- GET /api/v1/weighbills/{bill_id}
-- PUT /api/v1/weighbills/{bill_id}
-- DELETE /api/v1/weighbills/{bill_id}
-- POST /api/v1/weighbills/{bill_id}/confirm
-- GET /api/v1/weighbills/match/delivery
-- GET /api/v1/weighbills/contract/price
+- POST /api/v1/weighbills/ocr: 上传磅单图片并 OCR 识别。
+- POST /api/v1/weighbills: 新增磅单。
+- GET /api/v1/weighbills: 查询磅单列表。
+- GET /api/v1/weighbills/{bill_id}: 查询磅单详情。
+- PUT /api/v1/weighbills/{bill_id}: 更新磅单。
+- DELETE /api/v1/weighbills/{bill_id}: 删除磅单。
+- POST /api/v1/weighbills/{bill_id}/confirm: 磅单确认/锁定。
+- GET /api/v1/weighbills/match/delivery: 匹配磅单与报货订单。
+- GET /api/v1/weighbills/contract/price: 根据合同查询价格信息。
 
-磅单结余/支付回单相关路由已注册到主路由。
+磅单结余/支付回单：
+- 结余、支付回单等相关路由已注册到主路由，详见 docs 页面。
 
 ## 安全性说明（当前状态）
 

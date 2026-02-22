@@ -10,6 +10,7 @@ from typing import Optional, List
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body, Form
 from pydantic import BaseModel, Field
 
+from app.services.contract_service import get_conn
 from app.services.weighbill_service import WeighbillService, get_weighbill_service
 
 router = APIRouter(prefix="/weighbills", tags=["磅单管理"])
@@ -294,76 +295,16 @@ async def list_weighbills(
 ):
     """查询磅单列表"""
     try:
-        with service.get_conn() as conn:
-            with conn.cursor() as cur:
-                where_clauses = ["1=1"]
-                params = []
-
-                if exact_status:
-                    where_clauses.append("ocr_status = %s")
-                    params.append(exact_status)
-
-                if exact_vehicle_no:
-                    where_clauses.append("vehicle_no = %s")
-                    params.append(exact_vehicle_no)
-
-                if exact_contract_no:
-                    where_clauses.append("contract_no = %s")
-                    params.append(exact_contract_no)
-
-                if fuzzy_keywords:
-                    tokens = [t for t in fuzzy_keywords.split() if t]
-                    or_clauses = []
-                    for token in tokens:
-                        like = f"%{token}%"
-                        or_clauses.append(
-                            "(contract_no LIKE %s OR vehicle_no LIKE %s OR product_name LIKE %s "
-                            "OR weigh_ticket_no LIKE %s)"
-                        )
-                        params.extend([like, like, like, like])
-                    if or_clauses:
-                        where_clauses.append("(" + " OR ".join(or_clauses) + ")")
-
-                if date_from:
-                    where_clauses.append("weigh_date >= %s")
-                    params.append(date_from)
-
-                if date_to:
-                    where_clauses.append("weigh_date <= %s")
-                    params.append(date_to)
-
-                where_sql = "WHERE " + " AND ".join(where_clauses)
-
-                # 总数
-                cur.execute(f"SELECT COUNT(*) FROM pd_weighbills {where_sql}", tuple(params))
-                total = cur.fetchone()[0]
-
-                # 分页
-                offset = (page - 1) * page_size
-                cur.execute(f"""
-                    SELECT * FROM pd_weighbills 
-                    {where_sql}
-                    ORDER BY created_at DESC
-                    LIMIT %s OFFSET %s
-                """, tuple(params + [page_size, offset]))
-
-                columns = [desc[0] for desc in cur.description]
-                rows = cur.fetchall()
-                data = []
-                for row in rows:
-                    item = dict(zip(columns, row))
-                    for key in ["weigh_date", "created_at", "updated_at"]:
-                        if item.get(key):
-                            item[key] = str(item[key])
-                    data.append(item)
-
-                return {
-                    "success": True,
-                    "data": data,
-                    "total": total,
-                    "page": page,
-                    "page_size": page_size
-                }
+        return service.list_weighbills(
+            exact_status=exact_status,
+            exact_vehicle_no=exact_vehicle_no,
+            exact_contract_no=exact_contract_no,
+            fuzzy_keywords=fuzzy_keywords,
+            date_from=date_from,
+            date_to=date_to,
+            page=page,
+            page_size=page_size,
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -381,7 +322,7 @@ async def delete_weighbill(
         if bill and bill.get("weighbill_image") and os.path.exists(bill["weighbill_image"]):
             os.remove(bill["weighbill_image"])
 
-        with service.get_conn() as conn:
+        with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM pd_weighbills WHERE id = %s", (bill_id,))
 

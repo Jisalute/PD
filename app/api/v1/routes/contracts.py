@@ -2,14 +2,17 @@
 合同管理路由 - 完整版
 支持OCR识别、手动录入、查看、编辑、导出
 """
+import csv
 import os
 import re
 import shutil
+from io import StringIO
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from datetime import date
 
@@ -353,4 +356,30 @@ async def export_contracts(
 ):
     """导出合同"""
     data = service.export_contracts(contract_ids)
-    return {"success": True, "data": data, "count": len(data)}
+    columns: List[str] = []
+    for row in data:
+        for key in row.keys():
+            if key not in columns:
+                columns.append(key)
+
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    if columns:
+        writer.writerow(columns)
+        for row in data:
+            writer.writerow([row.get(col) for col in columns])
+
+    filename = "contracts_export.csv"
+    if contract_ids and len(contract_ids) == 1 and data:
+        contract_no = str(data[0].get("contract_no") or "").strip()
+        if contract_no:
+            safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", contract_no)
+            filename = f"{safe_name}.csv"
+
+    csv_bytes = buffer.getvalue().encode("utf-8-sig")
+    headers = {"Content-Disposition": f"attachment; filename=\"{filename}\""}
+    return StreamingResponse(
+        iter([csv_bytes]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
