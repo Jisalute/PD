@@ -15,7 +15,8 @@ from app.services.customer_service import CustomerService
 
 logger = logging.getLogger(__name__)
 
-UPLOAD_DIR = Path("uploads/delivery_orders")
+# 使用绝对路径，避免工作目录变化导致的问题
+UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads" / "delivery_orders"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -30,12 +31,10 @@ class DeliveryService:
         - 公司人员上传有联单 -> 可指定为公司
         """
         if has_order == '有':
-            # 有联单默认司机，除非明确指定公司上传
             if uploaded_by == '公司':
                 return '公司'
             return '司机'
         else:
-            # 无联单默认公司
             return '公司'
 
     def _calculate_price(self, factory_name: str, product_name: str, quantity: Decimal) -> tuple:
@@ -46,7 +45,6 @@ class DeliveryService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # 1. 查找客户ID
                     cur.execute(
                         "SELECT id FROM pd_customers WHERE smelter_name = %s",
                         (factory_name,)
@@ -55,7 +53,6 @@ class DeliveryService:
                     if not customer:
                         return None, None, None
 
-                    # 2. 查找生效中的合同
                     cur.execute("""
                         SELECT contract_no, unit_price 
                         FROM pd_contracts 
@@ -85,18 +82,20 @@ class DeliveryService:
 
     def create_delivery(self, data: Dict, image_file: bytes = None, current_user: str = "system") -> Dict[str, Any]:
         """创建报货订单"""
+        image_path = None
+        temp_file_path = None
+
         try:
             # 处理来源类型
             has_order = data.get('has_delivery_order', '无')
-            uploaded_by = data.get('uploaded_by')  # 前端可传'公司'表示公司人员上传
+            uploaded_by = data.get('uploaded_by')
             source_type = self._determine_source_type(has_order, uploaded_by)
             data['source_type'] = source_type
 
-            # 发货人默认为当前操作人
             if not data.get('shipper'):
                 data['shipper'] = current_user
 
-            # 计算价格（如果有关联工厂和品种）
+            # 计算价格
             contract_no = None
             unit_price = None
             total_amount = None
@@ -108,18 +107,17 @@ class DeliveryService:
                     Decimal(str(data['quantity']))
                 )
 
-            # 处理图片上传
-            image_path = None
+            # 先处理图片到临时位置
             if image_file and has_order == '有':
-                # 保存联单图片
                 file_ext = ".jpg"
                 safe_name = re.sub(r'[^\w\-]', '_', str(data.get('vehicle_no', 'unknown')))
                 filename = f"order_{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}{file_ext}"
                 file_path = UPLOAD_DIR / filename
 
+                # 先保存到临时路径
+                temp_file_path = file_path
                 with open(file_path, "wb") as f:
                     f.write(image_file)
-
                 image_path = str(file_path)
 
             with get_conn() as conn:
@@ -157,6 +155,9 @@ class DeliveryService:
 
                     delivery_id = cur.lastrowid
 
+                    # 数据库成功后再确认文件（已经保存了，这里只是确认）
+                    temp_file_path = None
+
                     return {
                         "success": True,
                         "message": "报货订单创建成功",
@@ -170,57 +171,65 @@ class DeliveryService:
                     }
 
         except Exception as e:
+            # 如果数据库失败，删除已保存的图片
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except:
+                    pass
             logger.error(f"创建报货订单失败: {e}")
             return {"success": False, "error": str(e)}
 
-    def update_delivery(self, delivery_id: int, data: Dict, image_file: bytes = None, current_user: str = "system") -> \
-    Dict[str, Any]:
-        """更新报货订单"""
+    def update_delivery(self, delivery_id: int, data: Dict,
+                        image_file: bytes = None, delete_image: bool = False) -> Dict[str, Any]:
+        """
+        更新报货订单（支持修改联单状态和重新上传图片）
+        """
+        temp_new_file = None
+        old_image_to_delete = None
+
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # 检查是否存在
-                    cur.execute("SELECT * FROM pd_deliveries WHERE id = %s", (delivery_id,))
+                    cur.execute(
+                        "SELECT has_delivery_order, delivery_order_image FROM pd_deliveries WHERE id = %s",
+                        (delivery_id,)
+                    )
                     old = cur.fetchone()
                     if not old:
-                        return {"success": False, "error": "订单不存在"}
+                        return {"success": False, "error": f"订单ID {delivery_id} 不存在"}
 
-                    old_data = dict(zip([desc[0] for desc in cur.description], old))
+                    old_has_order, old_image_path = old
 
-                    # 处理来源类型（如果修改了联单状态）
-                    has_order = data.get('has_delivery_order', old_data['has_delivery_order'])
+                    # 处理来源类型
+                    has_order = data.get('has_delivery_order', old_has_order)
                     if 'has_delivery_order' in data or 'uploaded_by' in data:
                         uploaded_by = data.get('uploaded_by')
                         data['source_type'] = self._determine_source_type(has_order, uploaded_by)
 
-                    # 重新计算价格（如果关键字段变了）
-                    factory = data.get('target_factory_name', old_data['target_factory_name'])
-                    product = data.get('product_name', old_data['product_name'])
-                    qty = data.get('quantity', old_data['quantity'])
+                    # 处理图片 - 先准备新文件，不立即删除旧文件
+                    new_image_path = old_image_path
 
-                    if (data.get('target_factory_name') or data.get('product_name') or data.get('quantity')):
-                        contract_no, unit_price, total_amount = self._calculate_price(
-                            factory, product, Decimal(str(qty)) if qty else Decimal('0')
-                        )
-                        data['contract_no'] = contract_no
-                        data['contract_unit_price'] = unit_price
-                        data['total_amount'] = total_amount
+                    if delete_image and old_image_path:
+                        old_image_to_delete = old_image_path
+                        new_image_path = None
 
-                    # 处理新图片
-                    if image_file and has_order == '有':
-                        # 删除旧图片
-                        if old_data.get('delivery_order_image') and os.path.exists(old_data['delivery_order_image']):
-                            os.remove(old_data['delivery_order_image'])
-
-                        # 保存新图片
-                        safe_name = re.sub(r'[^\w\-]', '_', str(data.get('vehicle_no', old_data['vehicle_no'])))
-                        filename = f"order_{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+                    if image_file:
+                        # 保存新图片到临时位置（或最终位置，但记录旧文件待删除）
+                        safe_name = re.sub(r'[^\w\-]', '_', str(delivery_id))
+                        filename = f"delivery_{safe_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
                         file_path = UPLOAD_DIR / filename
 
                         with open(file_path, "wb") as f:
                             f.write(image_file)
 
-                        data['delivery_order_image'] = str(file_path)
+                        temp_new_file = str(file_path)
+                        new_image_path = temp_new_file
+
+                        if old_image_path:
+                            old_image_to_delete = old_image_path
+
+                    data['delivery_order_image'] = new_image_path
 
                     # 构建更新SQL
                     fields = [
@@ -238,16 +247,38 @@ class DeliveryService:
                             update_fields.append(f"{f} = %s")
                             params.append(data[f])
 
-                    if not update_fields:
+                    # 关键修复：允许仅删除图片或仅上传图片
+                    if not update_fields and not delete_image and not image_file:
                         return {"success": False, "error": "没有要更新的字段"}
 
                     params.append(delivery_id)
                     sql = f"UPDATE pd_deliveries SET {', '.join(update_fields)} WHERE id = %s"
                     cur.execute(sql, tuple(params))
 
-                    return {"success": True, "message": "更新成功"}
+                    # 数据库更新成功后，再处理文件删除
+                    if old_image_to_delete and os.path.exists(old_image_to_delete):
+                        try:
+                            os.remove(old_image_to_delete)
+                        except Exception as e:
+                            logger.warning(f"删除旧图片失败: {e}")
+
+                    return {
+                        "success": True,
+                        "message": "更新成功",
+                        "data": {
+                            "id": delivery_id,
+                            "has_delivery_order": has_order,
+                            "delivery_order_image": new_image_path
+                        }
+                    }
 
         except Exception as e:
+            # 如果数据库失败，删除新上传的临时文件
+            if temp_new_file and os.path.exists(temp_new_file):
+                try:
+                    os.remove(temp_new_file)
+                except:
+                    pass
             logger.error(f"更新报货订单失败: {e}")
             return {"success": False, "error": str(e)}
 
@@ -264,7 +295,6 @@ class DeliveryService:
                     columns = [desc[0] for desc in cur.description]
                     data = dict(zip(columns, row))
 
-                    # 转换时间格式
                     for key in ['report_date', 'delivery_time', 'created_at', 'updated_at']:
                         if data.get(key):
                             data[key] = str(data[key])
@@ -338,11 +368,9 @@ class DeliveryService:
 
                     where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-                    # 总数
                     cur.execute(f"SELECT COUNT(*) FROM pd_deliveries {where_sql}", tuple(params))
                     total = cur.fetchone()[0]
 
-                    # 分页数据
                     offset = (page - 1) * page_size
                     cur.execute(f"""
                         SELECT * FROM pd_deliveries 
@@ -378,14 +406,22 @@ class DeliveryService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # 获取图片路径
                     cur.execute("SELECT delivery_order_image FROM pd_deliveries WHERE id = %s", (delivery_id,))
                     row = cur.fetchone()
 
-                    if row and row[0] and os.path.exists(row[0]):
-                        os.remove(row[0])
+                    if row and row[0]:
+                        image_path = row[0]
+                        cur.execute("DELETE FROM pd_deliveries WHERE id = %s", (delivery_id,))
 
-                    cur.execute("DELETE FROM pd_deliveries WHERE id = %s", (delivery_id,))
+                        # 数据库删除成功后，再删除文件
+                        if os.path.exists(image_path):
+                            try:
+                                os.remove(image_path)
+                            except Exception as e:
+                                logger.warning(f"删除图片文件失败: {e}")
+                    else:
+                        cur.execute("DELETE FROM pd_deliveries WHERE id = %s", (delivery_id,))
+
                     return {"success": True, "message": "删除成功"}
 
         except Exception as e:

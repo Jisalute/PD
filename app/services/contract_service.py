@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, date
 
 import pymysql
 from PIL import Image, ImageEnhance, ImageFilter
+from pathlib import Path
 
 try:
     from rapidocr_onnxruntime import RapidOCR
@@ -500,27 +501,52 @@ class ContractService:
             return {"success": False, "error": str(e)}
 
     def update_contract(self, contract_id: int, data: Dict, products: List[Dict] = None) -> Dict[str, Any]:
-        """更新合同"""
+        """更新合同（含图片重命名）"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT id FROM pd_contracts WHERE id = %s", (contract_id,))
-                    if not cur.fetchone():
+                    # 获取原合同信息（包括图片路径和合同号）
+                    cur.execute("SELECT contract_no, contract_image_path FROM pd_contracts WHERE id = %s",
+                                (contract_id,))
+                    old = cur.fetchone()
+                    if not old:
                         return {"success": False, "error": f"合同ID {contract_id} 不存在"}
 
-                    if data.get("contract_date"):
-                        data["end_date"] = self._compute_end_date(data.get("contract_date"))
-                    elif "end_date" in data:
-                        cur.execute("SELECT contract_date FROM pd_contracts WHERE id = %s", (contract_id,))
-                        row = cur.fetchone()
-                        if row:
-                            data["end_date"] = self._compute_end_date(row[0])
+                    old_contract_no, old_image_path = old
 
+                    # 如果要修改合同编号，检查新编号是否被占用
+                    new_contract_no = data.get("contract_no")
+                    if new_contract_no and new_contract_no != old_contract_no:
+                        cur.execute("SELECT id FROM pd_contracts WHERE contract_no = %s AND id != %s",
+                                    (new_contract_no, contract_id))
+                        if cur.fetchone():
+                            return {"success": False, "error": f"合同编号 {new_contract_no} 已被使用"}
+
+                    # 处理图片重命名
+                    new_image_path = old_image_path
+                    if new_contract_no and new_contract_no != old_contract_no and old_image_path:
+                        old_path = Path(old_image_path)
+                        if old_path.exists():
+                            # 生成新文件名
+                            safe_name = re.sub(r'[^\w\-]', '_', new_contract_no)
+                            new_filename = f"{safe_name}.jpg"
+                            new_path = old_path.parent / new_filename
+
+                            # 如果新文件名已存在，先删除
+                            if new_path.exists() and new_path != old_path:
+                                os.remove(new_path)
+
+                            # 重命名文件
+                            os.rename(old_path, new_path)
+                            new_image_path = str(new_path)
+                            data["contract_image_path"] = new_image_path
+
+                    # 构建更新SQL
                     update_fields = []
                     params = []
                     fields = ["contract_no", "contract_date", "end_date", "smelter_company",
-                             "total_quantity", "arrival_payment_ratio", "final_payment_ratio",
-                             "status", "remarks", "contract_image_path"]
+                              "total_quantity", "arrival_payment_ratio", "final_payment_ratio",
+                              "status", "remarks", "contract_image_path"]
 
                     for field in fields:
                         if field in data:
@@ -532,6 +558,7 @@ class ContractService:
                         sql = f"UPDATE pd_contracts SET {', '.join(update_fields)} WHERE id = %s"
                         cur.execute(sql, tuple(params))
 
+                    # 更新品种明细
                     if products is not None:
                         cur.execute("DELETE FROM pd_contract_products WHERE contract_id = %s", (contract_id,))
                         for idx, product in enumerate(products):
@@ -541,7 +568,15 @@ class ContractService:
                                 VALUES (%s, %s, %s, %s)
                             """, (contract_id, product["product_name"], product.get("unit_price"), idx))
 
-                    return {"success": True, "message": "合同更新成功"}
+                    return {
+                        "success": True,
+                        "message": "合同更新成功",
+                        "data": {
+                            "id": contract_id,
+                            "contract_no": new_contract_no or old_contract_no,
+                            "image_path": new_image_path
+                        }
+                    }
 
         except Exception as e:
             logger.error(f"更新合同失败: {e}")
