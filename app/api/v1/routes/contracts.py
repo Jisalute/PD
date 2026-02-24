@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 from datetime import date
 
@@ -335,6 +335,37 @@ async def update_contract(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/{contract_id}/image")
+async def get_contract_image(
+        contract_id: int,
+        service: ContractService = Depends(get_contract_service)
+):
+    """
+    查看合同图片
+    直接返回图片文件
+    """
+    try:
+        contract = service.get_contract_detail(contract_id)
+        if not contract:
+            raise HTTPException(status_code=404, detail="合同不存在")
+
+        image_path = contract.get("contract_image_path")
+        if not image_path:
+            raise HTTPException(status_code=404, detail="该合同没有上传图片")
+
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail="图片文件不存在")
+
+        return FileResponse(
+            path=image_path,
+            media_type="image/jpeg",
+            filename=f"contract_{contract.get('contract_no')}.jpg"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取图片失败: {str(e)}")
 
 @router.delete("/{contract_id}")
 async def delete_contract(

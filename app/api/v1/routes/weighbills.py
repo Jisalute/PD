@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body, Form
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from app.services.balance_service import BalanceService, get_balance_service
@@ -348,8 +349,8 @@ async def delete_weighbill(
 @router.post("/{bill_id}/confirm")
 async def confirm_weighbill(
         bill_id: int,
-    service: WeighbillService = Depends(get_weighbill_service),
-    balance_service: BalanceService = Depends(get_balance_service)
+        service: WeighbillService = Depends(get_weighbill_service),
+        balance_service: BalanceService = Depends(get_balance_service)
 ):
     """
     确认磅单（OCR识别后确认无误）
@@ -362,7 +363,6 @@ async def confirm_weighbill(
         result = service.confirm_weighbill(bill_id)
 
         if result["success"]:
-            # TODO: 更新关联的报货订单状态
             balance_result = balance_service.generate_balance_details(weighbill_id=bill_id)
             if not balance_result.get("success"):
                 raise HTTPException(status_code=400, detail=balance_result.get("error", "结余明细生成失败"))
@@ -416,3 +416,36 @@ async def get_contract_price(
         return {"success": True, "unit_price": price}
     else:
         return {"success": False, "message": "未找到合同或价格信息"}
+
+
+@router.get("/{bill_id}/image")
+async def get_weighbill_image(
+        bill_id: int,
+        service: WeighbillService = Depends(get_weighbill_service)
+):
+    """
+    查看磅单图片
+    直接返回图片文件
+    """
+    try:
+        bill = service.get_weighbill(bill_id)
+        if not bill:
+            raise HTTPException(status_code=404, detail="磅单不存在")
+
+        image_path = bill.get("weighbill_image")
+        if not image_path:
+            raise HTTPException(status_code=404, detail="该磅单没有上传图片")
+
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail="图片文件不存在")
+
+        return FileResponse(
+            path=image_path,
+            media_type="image/jpeg",
+            filename=f"weighbill_{bill.get('weigh_ticket_no') or bill_id}.jpg"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取图片失败: {str(e)}")

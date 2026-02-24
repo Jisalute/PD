@@ -99,10 +99,10 @@ async def create_delivery(
         payee: Optional[str] = Form(None),
         service_fee: float = Form(0),
         status: str = Form("待确认"),
-        uploaded_by: Optional[str] = Form(None),  # 公司人员传"公司"
+        uploaded_by: Optional[str] = Form(None),
         delivery_order_image: Optional[UploadFile] = File(None),
         service: DeliveryService = Depends(get_delivery_service),
-        current_user: str = "admin"  # 应从token获取
+        current_user: str = "admin"
 ):
     """创建报货订单（支持上传联单图片）"""
     try:
@@ -125,7 +125,6 @@ async def create_delivery(
             "uploaded_by": uploaded_by,
         }
 
-        # 读取图片
         image_bytes = None
         if delivery_order_image:
             image_bytes = await delivery_order_image.read()
@@ -159,12 +158,12 @@ async def list_deliveries(
 ):
     """查询报货订单列表"""
     return service.list_deliveries(
-    exact_factory_name=exact_factory_name,
-    exact_status=exact_status,
-    exact_vehicle_no=exact_vehicle_no,
-    exact_driver_name=exact_driver_name,
-    exact_driver_phone=exact_driver_phone,
-    fuzzy_keywords=fuzzy_keywords,
+        exact_factory_name=exact_factory_name,
+        exact_status=exact_status,
+        exact_vehicle_no=exact_vehicle_no,
+        exact_driver_name=exact_driver_name,
+        exact_driver_phone=exact_driver_phone,
+        fuzzy_keywords=fuzzy_keywords,
         date_from=date_from,
         date_to=date_to,
         page=page,
@@ -187,15 +186,21 @@ async def get_delivery(
 @router.put("/{delivery_id}", response_model=dict)
 async def update_delivery(
         delivery_id: int,
-        request: DeliveryUpdateRequest,  # 去掉 Body(...)，直接作为JSON
+        request: DeliveryUpdateRequest,
         service: DeliveryService = Depends(get_delivery_service),
         current_user: str = "admin"
 ):
-    """编辑报货订单（纯JSON，不支持文件上传）"""
+    """
+    编辑报货订单（纯JSON，不涉及文件上传）
+    如需修改图片，请使用 /{delivery_id}/upload-order 接口
+    """
     try:
         data = {k: v for k, v in request.dict().items() if v is not None}
 
-        result = service.update_delivery(delivery_id, data)
+        if not data:
+            raise HTTPException(status_code=400, detail="没有要更新的字段")
+
+        result = service.update_delivery(delivery_id, data, None, False)
 
         if result["success"]:
             return result
@@ -224,26 +229,42 @@ async def delete_delivery(
 @router.post("/{delivery_id}/upload-order")
 async def upload_delivery_order(
         delivery_id: int,
-        image: UploadFile = File(...),
-        uploaded_by: str = Form("司机"),  # 上传者身份
+        image: UploadFile = File(..., description="联单图片"),
+        has_delivery_order: Optional[str] = Form(None, description="同步修改联单状态：有/无"),
+        uploaded_by: str = Form("公司"),
         service: DeliveryService = Depends(get_delivery_service)
 ):
-    """单独上传/更新联单图片"""
+    """
+    单独上传/更新联单图片
+    用于：后期补传、重新上传、修改状态
+    """
     try:
         image_bytes = await image.read()
 
-        # 更新订单：有联单、来源根据上传者判断
-        data = {
-            "has_delivery_order": "有",
-            "uploaded_by": uploaded_by
-        }
+        data = {}
+        if has_delivery_order:
+            data['has_delivery_order'] = has_delivery_order
+            data['uploaded_by'] = uploaded_by
 
         result = service.update_delivery(delivery_id, data, image_bytes)
 
         if result["success"]:
-            return {"success": True, "message": "联单上传成功"}
+            return {"success": True, "message": "图片上传成功", "data": result["data"]}
         else:
             raise HTTPException(status_code=400, detail=result.get("error"))
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{delivery_id}/image")
+async def delete_delivery_image(
+    delivery_id: int,
+    service: DeliveryService = Depends(get_delivery_service)
+):
+    """删除联单图片（保留有联单状态，但删除图片文件）"""
+    result = service.update_delivery(delivery_id, {}, None, delete_image=True)
+    if result["success"]:
+        return {"success": True, "message": "图片已删除"}
+    else:
+        raise HTTPException(status_code=400, detail=result.get("error"))

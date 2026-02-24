@@ -492,18 +492,45 @@ class WeighbillService:
             return {"success": False, "error": str(e)}
 
     def confirm_weighbill(self, bill_id: int) -> Dict[str, Any]:
-        """确认磅单（不标记为已修正）"""
+        """
+        确认磅单（不标记为已修正）
+        同时更新关联的报货订单状态为"已完成"
+        """
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    # 先获取磅单信息（包括关联的delivery_id）
+                    cur.execute(
+                        "SELECT delivery_id FROM pd_weighbills WHERE id = %s",
+                        (bill_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return {"success": False, "error": "磅单不存在"}
+
+                    delivery_id = row[0]
+
+                    # 更新磅单状态
                     cur.execute(
                         "UPDATE pd_weighbills SET ocr_status = %s WHERE id = %s",
                         ("已确认", bill_id),
                     )
-                    if cur.rowcount == 0:
-                        return {"success": False, "error": "磅单不存在"}
 
-                    return {"success": True, "message": "磅单已确认"}
+                    # 更新关联的报货订单状态
+                    if delivery_id:
+                        cur.execute(
+                            "UPDATE pd_deliveries SET status = %s WHERE id = %s AND status NOT IN (%s, %s)",
+                            ("已完成", delivery_id, "已取消", "已完成"),
+                        )
+
+                    return {
+                        "success": True,
+                        "message": "磅单已确认",
+                        "data": {
+                            "weighbill_id": bill_id,
+                            "delivery_id": delivery_id
+                        }
+                    }
 
         except Exception as e:
             logger.error(f"确认磅单失败: {e}")
