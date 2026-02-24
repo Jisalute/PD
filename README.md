@@ -96,6 +96,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 - POST /api/v1/contracts/manual: 手动录入合同（含品种与单价明细）。
 - GET /api/v1/contracts: 分页查询合同列表，支持精确条件与模糊关键词。
 - GET /api/v1/contracts/{contract_id}: 查询合同详情（含品种明细）。
+- GET /api/v1/contracts/{contract_id}/image: 预览合同图片。
 - PUT /api/v1/contracts/{contract_id}: 更新合同与品种明细。
 - DELETE /api/v1/contracts/{contract_id}: 删除合同。
 - POST /api/v1/contracts/export: 导出合同数据（CSV 文件下载，传合同ID列表为空则导出全部）。
@@ -111,6 +112,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 - POST /api/v1/deliveries: 新增报货订单/销售台账记录。
 - GET /api/v1/deliveries: 查询报货订单列表。
 - GET /api/v1/deliveries/{delivery_id}: 查询单条报货订单。
+- GET /api/v1/deliveries/{delivery_id}/image: 预览联单图片。
 - PUT /api/v1/deliveries/{delivery_id}: 更新报货订单。
 - DELETE /api/v1/deliveries/{delivery_id}: 删除报货订单。
 - POST /api/v1/deliveries/{delivery_id}/upload-order: 上传报货单附件。
@@ -120,6 +122,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 - POST /api/v1/weighbills: 新增磅单。
 - GET /api/v1/weighbills: 查询磅单列表。
 - GET /api/v1/weighbills/{bill_id}: 查询磅单详情。
+- GET /api/v1/weighbills/{bill_id}/image: 预览磅单图片。
 - PUT /api/v1/weighbills/{bill_id}: 更新磅单。
 - DELETE /api/v1/weighbills/{bill_id}: 删除磅单。
 - POST /api/v1/weighbills/{bill_id}/confirm: 磅单确认/锁定。

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query, Body
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.services.delivery_service import DeliveryService, get_delivery_service
@@ -268,3 +269,36 @@ async def delete_delivery_image(
         return {"success": True, "message": "图片已删除"}
     else:
         raise HTTPException(status_code=400, detail=result.get("error"))
+
+
+@router.get("/{delivery_id}/image")
+async def get_delivery_image(
+    delivery_id: int,
+    service: DeliveryService = Depends(get_delivery_service)
+):
+    """
+    查看联单图片
+    直接返回图片文件
+    """
+    try:
+        delivery = service.get_delivery(delivery_id)
+        if not delivery:
+            raise HTTPException(status_code=404, detail="订单不存在")
+
+        image_path = delivery.get("delivery_order_image")
+        if not image_path:
+            raise HTTPException(status_code=404, detail="该订单没有上传图片")
+
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail="图片文件不存在")
+
+        return FileResponse(
+            path=image_path,
+            media_type="image/jpeg",
+            filename=f"delivery_{delivery_id}.jpg"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取图片失败: {str(e)}")
