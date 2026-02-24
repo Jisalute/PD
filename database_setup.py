@@ -232,6 +232,7 @@ TABLE_STATEMENTS = [
 		end_date DATE COMMENT '合同截止日期',
 		smelter_company VARCHAR(128) COMMENT '冶炼公司',
 		total_quantity DECIMAL(12, 3) COMMENT '合同总数量（吨）',
+		truck_count DECIMAL(12, 2) COMMENT '车数（总数量/35）',
 		arrival_payment_ratio DECIMAL(5, 4) DEFAULT 0.9 COMMENT '到货款比例',
 		final_payment_ratio DECIMAL(5, 4) DEFAULT 0.1 COMMENT '尾款比例',
 		contract_image_path VARCHAR(255) COMMENT '合同图片路径',

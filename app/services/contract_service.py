@@ -178,12 +178,15 @@ class ContractService:
                 main_price = p["unit_price"]
                 break
 
+        truck_count = self._calculate_truck_count(total_quantity)
+
         return {
             "contract_no": contract_no,
             "contract_date": contract_date,
             "end_date": end_date,
             "smelter_company": smelter,
             "total_quantity": float(total_quantity) if total_quantity else None,
+            "truck_count": float(truck_count) if truck_count else None,
             "arrival_payment_ratio": float(arrival_ratio) if arrival_ratio else 0.9,
             "final_payment_ratio": float(Decimal("1") - arrival_ratio) if arrival_ratio else 0.1,
             "products": products if products else [],
@@ -194,6 +197,14 @@ class ContractService:
             "ocr_success": True,
             "ocr_message": self._generate_ocr_message(contract_no, products),
         }
+
+    def _calculate_truck_count(self, total_quantity: Optional[Decimal]) -> Optional[Decimal]:
+        if total_quantity is None:
+            return None
+        try:
+            return (Decimal(str(total_quantity)) / Decimal("35")).quantize(Decimal("0.01"))
+        except Exception:
+            return None
 
     def _generate_ocr_message(self, contract_no, products) -> str:
         """生成OCR结果说明"""
@@ -442,6 +453,8 @@ class ContractService:
     def create_contract(self, data: Dict, products: List[Dict]) -> Dict[str, Any]:
         """创建合同（包含品种明细）"""
         try:
+            if "total_quantity" in data and "truck_count" not in data:
+                data["truck_count"] = self._calculate_truck_count(data.get("total_quantity"))
             if data.get("contract_date"):
                 data["end_date"] = self._compute_end_date(data.get("contract_date"))
             duplicate_id = self._find_duplicate_contract(data, products)
@@ -460,15 +473,16 @@ class ContractService:
                     cur.execute("""
                         INSERT INTO pd_contracts 
                         (contract_no, contract_date, end_date, smelter_company, 
-                         total_quantity, arrival_payment_ratio, final_payment_ratio,
+                         total_quantity, truck_count, arrival_payment_ratio, final_payment_ratio,
                          contract_image_path, status, remarks)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         data.get("contract_no"),
                         data.get("contract_date"),
                         data.get("end_date"),
                         data.get("smelter_company"),
                         data.get("total_quantity"),
+                        data.get("truck_count"),
                         data.get("arrival_payment_ratio", Decimal("0.9")),
                         data.get("final_payment_ratio", Decimal("0.1")),
                         data.get("contract_image_path"),
@@ -503,6 +517,8 @@ class ContractService:
     def update_contract(self, contract_id: int, data: Dict, products: List[Dict] = None) -> Dict[str, Any]:
         """更新合同（含图片重命名）"""
         try:
+            if "total_quantity" in data:
+                data["truck_count"] = self._calculate_truck_count(data.get("total_quantity"))
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     # 获取原合同信息（包括图片路径和合同号）
@@ -545,7 +561,7 @@ class ContractService:
                     update_fields = []
                     params = []
                     fields = ["contract_no", "contract_date", "end_date", "smelter_company",
-                              "total_quantity", "arrival_payment_ratio", "final_payment_ratio",
+                              "total_quantity", "truck_count", "arrival_payment_ratio", "final_payment_ratio",
                               "status", "remarks", "contract_image_path"]
 
                     for field in fields:

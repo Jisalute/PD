@@ -43,6 +43,7 @@ class ContractOCRResponse(BaseModel):
     end_date: Optional[str] = None
     smelter_company: Optional[str] = None
     total_quantity: Optional[float] = None
+    truck_count: Optional[float] = None
     arrival_payment_ratio: float = 0.9
     final_payment_ratio: float = 0.1
     products: List[ProductItem] = []
@@ -91,6 +92,7 @@ class ContractOut(BaseModel):
     end_date: Optional[date] = None
     smelter_company: Optional[str] = None
     total_quantity: Optional[float] = None
+    truck_count: Optional[float] = None
     arrival_payment_ratio: float
     final_payment_ratio: float
     status: str
