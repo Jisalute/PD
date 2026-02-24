@@ -147,6 +147,8 @@ async def create_delivery(
 async def list_deliveries(
     exact_factory_name: Optional[str] = Query(None, description="精确目标工厂"),
     exact_status: Optional[str] = Query(None, description="精确状态"),
+    exact_has_delivery_order: Optional[str] = Query(None, description="精确有无联单：有/无"),
+    exact_upload_status: Optional[str] = Query(None, description="联单上传状态：已上传/未上传"),
     exact_vehicle_no: Optional[str] = Query(None, description="精确车牌号"),
     exact_driver_name: Optional[str] = Query(None, description="精确司机姓名"),
     exact_driver_phone: Optional[str] = Query(None, description="精确司机电话"),
@@ -161,6 +163,8 @@ async def list_deliveries(
     return service.list_deliveries(
         exact_factory_name=exact_factory_name,
         exact_status=exact_status,
+        exact_has_delivery_order=exact_has_delivery_order,
+        exact_upload_status=exact_upload_status,
         exact_vehicle_no=exact_vehicle_no,
         exact_driver_name=exact_driver_name,
         exact_driver_phone=exact_driver_phone,

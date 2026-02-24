@@ -118,6 +118,8 @@ class WeighbillOut(BaseModel):
     net_weight: Optional[float] = None
     unit_price: Optional[float] = None
     total_amount: Optional[float] = None
+    shipper: Optional[str] = None
+    payee: Optional[str] = None
     weighbill_image: Optional[str] = None
     ocr_status: str = "待确认"
     is_manual_corrected: int = 0
@@ -278,6 +280,18 @@ async def list_weighbills(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{bill_id}", response_model=WeighbillOut)
+async def get_weighbill(
+        bill_id: int,
+        service: WeighbillService = Depends(get_weighbill_service)
+):
+    """查看磅单详情"""
+    bill = service.get_weighbill(bill_id)
+    if not bill:
+        raise HTTPException(status_code=404, detail="磅单不存在")
+    return bill
 
 
 @router.delete("/{bill_id}")

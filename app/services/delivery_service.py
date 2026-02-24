@@ -331,6 +331,8 @@ class DeliveryService:
             self,
             exact_factory_name: str = None,
             exact_status: str = None,
+            exact_has_delivery_order: str = None,
+            exact_upload_status: str = None,
             exact_vehicle_no: str = None,
             exact_driver_name: str = None,
             exact_driver_phone: str = None,
@@ -354,6 +356,20 @@ class DeliveryService:
                     if exact_status:
                         where_clauses.append("status = %s")
                         params.append(exact_status)
+
+                    if exact_has_delivery_order:
+                        where_clauses.append("has_delivery_order = %s")
+                        params.append(exact_has_delivery_order)
+
+                    if exact_upload_status:
+                        if exact_upload_status == "已上传":
+                            where_clauses.append(
+                                "delivery_order_image IS NOT NULL AND delivery_order_image <> ''"
+                            )
+                        elif exact_upload_status == "未上传":
+                            where_clauses.append(
+                                "(delivery_order_image IS NULL OR delivery_order_image = '')"
+                            )
 
                     if exact_vehicle_no:
                         where_clauses.append("vehicle_no = %s")

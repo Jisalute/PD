@@ -558,7 +558,15 @@ class WeighbillService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT * FROM pd_weighbills WHERE id = %s", (bill_id,))
+                    cur.execute(
+                        """
+                        SELECT w.*, d.shipper, d.payee
+                        FROM pd_weighbills w
+                        LEFT JOIN pd_deliveries d ON w.delivery_id = d.id
+                        WHERE w.id = %s
+                        """,
+                        (bill_id,)
+                    )
                     row = cur.fetchone()
                     if not row:
                         return None
@@ -643,7 +651,9 @@ class WeighbillService:
                             d.target_factory_name,
                             d.driver_name,
                             d.driver_phone,
-                            d.driver_id_card
+                            d.driver_id_card,
+                            d.shipper,
+                            d.payee
                         FROM pd_weighbills w
                         LEFT JOIN pd_deliveries d ON w.delivery_id = d.id
                         {where}
