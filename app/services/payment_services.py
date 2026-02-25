@@ -474,6 +474,14 @@ class PaymentService:
 
                     # 添加状态名称
                     item['status_name'] = PaymentStatus(item['status']).name if item.get('status') is not None else None
+                    
+                    # 计算联单费：如果 has_delivery_order 为 '无'，则联单费为 150
+                    has_delivery_order = item.get('has_delivery_order')
+                    if has_delivery_order == '无':
+                        item['delivery_fee'] = 150.0
+                    else:
+                        # 有联单时，使用 service_fee 字段，如果没有则默认为 0
+                        item['delivery_fee'] = float(item.get('service_fee') or 0)
 
                     items.append(item)
 
