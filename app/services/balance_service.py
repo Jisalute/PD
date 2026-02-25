@@ -92,7 +92,8 @@ class BalanceService:
                             w.net_weight,
                             w.unit_price,
                             d.driver_name,
-                            d.driver_phone
+                            d.driver_phone,
+                            d.payee as payee_name
                         FROM pd_weighbills w
                         LEFT JOIN pd_deliveries d ON w.delivery_id = d.id
                         WHERE {where_sql}
@@ -133,6 +134,7 @@ class BalanceService:
                             'balance_id': cur.lastrowid,
                             'weighbill_id': data.get('weighbill_id'),
                             'driver_name': data.get('driver_name'),
+                            'payee_name': data.get('payee_name'),
                             'payable_amount': float(payable)
                         })
 
@@ -494,9 +496,10 @@ class BalanceService:
                 with conn.cursor() as cur:
                     # 主表
                     cur.execute("""
-                        SELECT b.*, w.weighbill_image 
+                        SELECT b.*, w.weighbill_image, d.payee as payee_name
                         FROM pd_balance_details b
                         LEFT JOIN pd_weighbills w ON b.weighbill_id = w.id
+                        LEFT JOIN pd_deliveries d ON b.delivery_id = d.id
                         WHERE b.id = %s
                     """, (balance_id,))
 
@@ -590,11 +593,13 @@ class BalanceService:
                         SELECT 
                             b.*,
                             w.weighbill_image,
+                            d.payee as payee_name,
                             (SELECT COUNT(*) FROM pd_receipt_settlements rs 
                              JOIN pd_payment_receipts pr ON rs.receipt_id = pr.id 
                              WHERE rs.balance_id = b.id) as receipt_count
                         FROM pd_balance_details b
                         LEFT JOIN pd_weighbills w ON b.weighbill_id = w.id
+                        LEFT JOIN pd_deliveries d ON b.delivery_id = d.id
                         WHERE {where_sql}
                         ORDER BY b.created_at DESC
                         LIMIT %s OFFSET %s

@@ -11,7 +11,6 @@ from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body, Form
 from pydantic import BaseModel, Field, ValidationError
 
-from app.core.paths import TEMP_UPLOADS_DIR
 from app.services.balance_service import BalanceService, get_balance_service, UPLOAD_DIR
 
 router = APIRouter(prefix="/balances", tags=["磅单结余管理"])
@@ -59,6 +58,7 @@ class BalanceOut(BaseModel):
     contract_no: Optional[str] = None
     driver_name: Optional[str] = None
     driver_phone: Optional[str] = None
+    payee_name: Optional[str] = None
     vehicle_no: Optional[str] = None
     payable_amount: Optional[float] = None
     paid_amount: Optional[float] = None
@@ -161,7 +161,7 @@ async def ocr_payment_receipt(
     if file.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail="仅支持jpg/png/bmp格式")
 
-    temp_path = TEMP_UPLOADS_DIR / f"receipt_{os.urandom(4).hex()}.jpg"
+    temp_path = Path("uploads/temp") / f"receipt_{os.urandom(4).hex()}.jpg"
     temp_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
