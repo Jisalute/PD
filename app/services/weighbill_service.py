@@ -409,7 +409,8 @@ class WeighbillService:
 
         return result
 
-    def create_weighbill(self, data: Dict, image_path: str = None, is_manual: bool = False, current_user: dict = None) -> Dict[str, Any]:
+    def create_weighbill(self, data: Dict, image_path: str = None, is_manual: bool = False,
+                         current_user: dict = None) -> Dict[str, Any]:
         """创建磅单记录"""
         try:
             # 处理操作人信息
@@ -419,15 +420,18 @@ class WeighbillService:
                 uploader_id = current_user.get("id")
                 uploader_name = current_user.get("name") or current_user.get("account") or "system"
 
+            # 确定上传状态
+            upload_status = '已上传' if image_path else '待上传'
+
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO pd_weighbills 
                         (weigh_date, delivery_time, weigh_ticket_no, contract_no, delivery_id, vehicle_no,
                          product_name, gross_weight, tare_weight, net_weight,
-                         unit_price, total_amount, weighbill_image, ocr_status, 
+                         unit_price, total_amount, weighbill_image, upload_status, ocr_status, 
                          ocr_raw_data, is_manual_corrected, uploader_id, uploader_name, uploaded_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     """, (
                         data.get("weigh_date"),
                         data.get("delivery_time"),
@@ -442,6 +446,7 @@ class WeighbillService:
                         data.get("unit_price"),
                         data.get("total_amount"),
                         image_path,
+                        upload_status,
                         "已确认" if is_manual else "待确认",
                         data.get("raw_text"),
                         1 if is_manual else 0,
@@ -456,6 +461,7 @@ class WeighbillService:
                         "message": "磅单保存成功",
                         "data": {
                             "id": bill_id,
+                            "upload_status": upload_status,
                             "uploader_id": uploader_id,
                             "uploader_name": uploader_name,
                         }
@@ -662,6 +668,7 @@ class WeighbillService:
                             w.unit_price,
                             w.total_amount,
                             w.weighbill_image,
+                            w.upload_status,
                             w.ocr_status,
                             w.ocr_raw_data,
                             w.is_manual_corrected,
@@ -682,6 +689,7 @@ class WeighbillService:
                             d.driver_id_card AS delivery_driver_id_card,
                             d.has_delivery_order AS delivery_has_delivery_order,
                             d.delivery_order_image AS delivery_order_image,
+                            d.upload_status AS delivery_upload_status,  -- 新增：联单上传状态
                             d.source_type AS delivery_source_type,
                             d.shipper AS delivery_shipper,
                             d.payee AS delivery_payee,
@@ -703,11 +711,13 @@ class WeighbillService:
                     for row in rows:
                         item = dict(zip(columns, row))
                         # 转换时间字段为字符串
-                        for key in ["weigh_date", "delivery_time", "created_at", "updated_at", "uploaded_at", "delivery_report_date"]:
+                        for key in ["weigh_date", "delivery_time", "created_at", "updated_at", "uploaded_at",
+                                    "delivery_report_date"]:
                             if item.get(key):
                                 item[key] = str(item[key])
                             # 增加联单费字段
-                            item["union_fee"] = 150 if item.get("delivery_has_delivery_order") == "无" else (item.get("delivery_service_fee") or 0)
+                        item["union_fee"] = 150 if item.get("delivery_has_delivery_order") == "无" else (
+                                    item.get("delivery_service_fee") or 0)
                         data.append(item)
 
                     return {

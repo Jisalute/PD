@@ -121,6 +121,7 @@ class WeighbillOut(BaseModel):
     unit_price: Optional[float] = None
     total_amount: Optional[float] = None
     weighbill_image: Optional[str] = None
+    upload_status: Optional[str] = None  # 磅单上传状态：已上传/待上传
     ocr_status: str = "待确认"
     ocr_raw_data: Optional[str] = None
     is_manual_corrected: int = 0
@@ -144,6 +145,7 @@ class WeighbillOut(BaseModel):
     delivery_driver_id_card: Optional[str] = None
     delivery_has_delivery_order: Optional[str] = None
     delivery_order_image: Optional[str] = None
+    delivery_upload_status: Optional[str] = None  # 新增：联单上传状态（已上传/待上传）
     delivery_source_type: Optional[str] = None
     delivery_shipper: Optional[str] = None
     delivery_payee: Optional[str] = None

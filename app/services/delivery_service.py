@@ -121,6 +121,9 @@ class DeliveryService:
                     Decimal(str(data['quantity']))
                 )
 
+            # 确定上传状态
+            upload_status = '待上传'
+
             # 先处理图片到临时位置
             if image_file and has_order == '有':
                 file_ext = ".jpg"
@@ -133,6 +136,7 @@ class DeliveryService:
                 with open(file_path, "wb") as f:
                     f.write(image_file)
                 image_path = str(file_path)
+                upload_status = '已上传'
 
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -140,10 +144,10 @@ class DeliveryService:
                         INSERT INTO pd_deliveries 
                         (report_date, warehouse, target_factory_id, target_factory_name,
                          product_name, quantity, vehicle_no, driver_name, driver_phone, driver_id_card,
-                         has_delivery_order, delivery_order_image, source_type,
+                         has_delivery_order, delivery_order_image, upload_status, source_type,
                          shipper, payee, service_fee, contract_no, contract_unit_price, total_amount, status,
                          uploader_id, uploader_name, uploaded_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     """, (
                         data.get('report_date'),
                         data.get('warehouse'),
@@ -157,6 +161,7 @@ class DeliveryService:
                         data.get('driver_id_card'),
                         has_order,
                         image_path,
+                        upload_status,
                         source_type,
                         data.get('shipper'),
                         data.get('payee'),
@@ -183,6 +188,7 @@ class DeliveryService:
                             "contract_unit_price": unit_price,
                             "total_amount": total_amount,
                             "source_type": source_type,
+                            "upload_status": upload_status,
                             "uploader_id": uploader_id,
                             "uploader_name": uploader_name,
                         }
@@ -210,14 +216,14 @@ class DeliveryService:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT has_delivery_order, delivery_order_image FROM pd_deliveries WHERE id = %s",
+                        "SELECT has_delivery_order, delivery_order_image, upload_status FROM pd_deliveries WHERE id = %s",
                         (delivery_id,)
                     )
                     old = cur.fetchone()
                     if not old:
                         return {"success": False, "error": f"订单ID {delivery_id} 不存在"}
 
-                    old_has_order, old_image_path = old
+                    old_has_order, old_image_path, old_upload_status = old
 
                     # 处理来源类型
                     has_order = data.get('has_delivery_order', old_has_order)
@@ -227,10 +233,12 @@ class DeliveryService:
 
                     # 处理图片 - 先准备新文件，不立即删除旧文件
                     new_image_path = old_image_path
+                    upload_status = old_upload_status  # 默认保持原状态
 
                     if delete_image and old_image_path:
                         old_image_to_delete = old_image_path
                         new_image_path = None
+                        upload_status = '待上传'
 
                     if image_file:
                         # 保存新图片到临时位置（或最终位置，但记录旧文件待删除）
@@ -243,17 +251,19 @@ class DeliveryService:
 
                         temp_new_file = str(file_path)
                         new_image_path = temp_new_file
+                        upload_status = '已上传'
 
                         if old_image_path:
                             old_image_to_delete = old_image_path
 
                     data['delivery_order_image'] = new_image_path
+                    data['upload_status'] = upload_status
 
                     # 构建更新SQL
                     fields = [
                         'report_date', 'warehouse', 'target_factory_id', 'target_factory_name',
                         'product_name', 'quantity', 'vehicle_no', 'driver_name', 'driver_phone', 'driver_id_card',
-                        'has_delivery_order', 'delivery_order_image', 'source_type',
+                        'has_delivery_order', 'delivery_order_image', 'upload_status', 'source_type',
                         'shipper', 'payee', 'service_fee', 'contract_no', 'contract_unit_price', 'total_amount',
                         'status'
                     ]
@@ -286,6 +296,7 @@ class DeliveryService:
                         "data": {
                             "id": delivery_id,
                             "has_delivery_order": has_order,
+                            "upload_status": upload_status,
                             "delivery_order_image": new_image_path
                         }
                     }
@@ -313,13 +324,12 @@ class DeliveryService:
                     columns = [desc[0] for desc in cur.description]
                     data = dict(zip(columns, row))
 
-                    for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:  # 新增 uploaded_at
+                    for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:
                         if data.get(key):
                             data[key] = str(data[key])
 
-                    data["delivery_order_upload_status"] = self._get_upload_status(
-                        data.get("delivery_order_image")
-                    )
+                    # 使用数据库中的 upload_status 字段
+                    data["delivery_order_upload_status"] = data.get("upload_status", "待上传")
 
                     return data
 
@@ -362,14 +372,8 @@ class DeliveryService:
                         params.append(exact_has_delivery_order)
 
                     if exact_upload_status:
-                        if exact_upload_status == "已上传":
-                            where_clauses.append(
-                                "delivery_order_image IS NOT NULL AND delivery_order_image <> ''"
-                            )
-                        elif exact_upload_status == "未上传":
-                            where_clauses.append(
-                                "(delivery_order_image IS NULL OR delivery_order_image = '')"
-                            )
+                        where_clauses.append("upload_status = %s")
+                        params.append(exact_upload_status)
 
                     if exact_vehicle_no:
                         where_clauses.append("vehicle_no = %s")
@@ -422,12 +426,11 @@ class DeliveryService:
                     data = []
                     for row in rows:
                         item = dict(zip(columns, row))
-                        for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:  # 新增 uploaded_at
+                        for key in ['report_date', 'created_at', 'updated_at', 'uploaded_at']:
                             if item.get(key):
                                 item[key] = str(item[key])
-                        item["delivery_order_upload_status"] = self._get_upload_status(
-                            item.get("delivery_order_image")
-                        )
+                        # 使用数据库中的 upload_status 字段
+                        item["delivery_order_upload_status"] = item.get("upload_status", "待上传")
                         data.append(item)
 
                     return {

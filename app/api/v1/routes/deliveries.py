@@ -68,7 +68,8 @@ class DeliveryOut(BaseModel):
     driver_id_card: Optional[str] = None
     has_delivery_order: Optional[str] = None
     delivery_order_image: Optional[str] = None
-    delivery_order_upload_status: Optional[str] = None
+    upload_status: Optional[str] = None  # 新增：已上传/待上传
+    delivery_order_upload_status: Optional[str] = None  # 兼容字段
     source_type: Optional[str] = None
     shipper: Optional[str] = None
     payee: Optional[str] = None
@@ -77,9 +78,9 @@ class DeliveryOut(BaseModel):
     contract_unit_price: Optional[float] = None
     total_amount: Optional[float] = None
     status: Optional[str] = None
-    uploader_id: Optional[int] = None  # 新增
-    uploader_name: Optional[str] = None  # 新增
-    uploaded_at: Optional[str] = None  # 新增
+    uploader_id: Optional[int] = None
+    uploader_name: Optional[str] = None
+    uploaded_at: Optional[str] = None
     created_at: Optional[str] = None
 
 
