@@ -284,6 +284,19 @@ def check_admin_or_finance_permission(current_user: dict):
         raise HTTPException(status_code=403, detail="权限不足，需要管理员或财务权限")
 
 
+def _parse_optional_int(value: Optional[str], default: int) -> int:
+    """Parse optional int query params, treating empty/None as default."""
+    if value is None:
+        return default
+    value = value.strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="参数格式错误") from exc
+
+
 # ========== 收款明细管理接口 ==========
 
 @router.post("/details", summary="创建收款明细", response_model=dict)
@@ -446,8 +459,8 @@ def delete_payment_detail(
 def list_contract_shipping_progress(
     contract_no: Optional[str] = Query(None, description="合同编号筛选"),
     smelter_name: Optional[str] = Query(None, description="冶炼厂名称筛选"),
-    page: int = Query(1, ge=1, description="页码"),
-    size: int = Query(20, ge=1, le=100, description="每页数量"),
+    page: Optional[str] = Query(None, description="页码"),
+    size: Optional[str] = Query(None, description="每页数量"),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -467,8 +480,8 @@ def list_contract_shipping_progress(
         result = PaymentService.get_contract_shipping_progress(
             contract_no=contract_no,
             smelter_name=smelter_name,
-            page=page,
-            size=size
+            page=_parse_optional_int(page, 1),
+            size=_parse_optional_int(size, 20)
         )
         return {
             "msg": "查询成功",
@@ -485,9 +498,9 @@ def list_contract_shipping_progress(
 def list_contract_payment_summary(
     contract_no: Optional[str] = Query(None, description="合同编号筛选"),
     smelter_name: Optional[str] = Query(None, description="冶炼厂名称筛选"),
-    status: Optional[int] = Query(None, ge=0, le=3, description="状态筛选"),
-    page: int = Query(1, ge=1, description="页码"),
-    size: int = Query(20, ge=1, le=100, description="每页数量"),
+    status: Optional[str] = Query(None, description="状态筛选"),
+    page: Optional[str] = Query(None, description="页码"),
+    size: Optional[str] = Query(None, description="每页数量"),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -505,12 +518,15 @@ def list_contract_payment_summary(
     check_finance_permission(current_user)
     
     try:
+        parsed_status = None
+        if status is not None and status.strip() != "":
+            parsed_status = _parse_optional_int(status, 0)
         result = PaymentService.get_contract_payment_summary(
             contract_no=contract_no,
             smelter_name=smelter_name,
-            status=status,
-            page=page,
-            size=size
+            status=parsed_status,
+            page=_parse_optional_int(page, 1),
+            size=_parse_optional_int(size, 20)
         )
         return {
             "msg": "查询成功",
