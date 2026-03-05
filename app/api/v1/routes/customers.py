@@ -59,6 +59,7 @@ async def create_customer(
             "contact_person": request.contact_person,
             "contact_phone": request.contact_phone,
             "contact_address": request.contact_address,
+            "credit_code": request.credit_code,
         }
 
         result = service.create_customer(data)
@@ -134,6 +135,8 @@ async def update_customer(
             data["contact_phone"] = request.contact_phone
         if request.contact_address is not None:
             data["contact_address"] = request.contact_address
+        if request.credit_code is not None:
+            data["credit_code"] = request.credit_code
 
         result = service.update_customer(customer_id, data)
 
