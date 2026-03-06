@@ -90,15 +90,30 @@ class DeliveryService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    factory_name = (factory_name or "").strip()
+                    product_name = (product_name or "").strip()
+                    effective_date = report_date or datetime.today().date().isoformat()
+
+                    logger.info(
+                        "合同匹配开始: factory=%s, product=%s, report_date=%s, effective_date=%s",
+                        factory_name,
+                        product_name,
+                        report_date,
+                        effective_date,
+                    )
+
                     cur.execute(
                         "SELECT id FROM pd_customers WHERE smelter_name = %s",
                         (factory_name,)
                     )
                     customer = cur.fetchone()
                     if not customer:
+                        logger.warning(
+                            "合同匹配失败: pd_customers 未找到 smelter_name=%s 的客户记录",
+                            factory_name,
+                        )
                         return None, None, None
 
-                    effective_date = report_date or datetime.today().date().isoformat()
                     cur.execute("""
                         SELECT c.contract_no, p.unit_price
                         FROM pd_contracts c
@@ -114,6 +129,79 @@ class DeliveryService:
 
                     contract = cur.fetchone()
                     if not contract:
+                        # 仅在未匹配到时输出诊断信息，帮助定位具体失败条件
+                        cur.execute(
+                            "SELECT COUNT(*) FROM pd_contracts WHERE smelter_company = %s",
+                            (factory_name,),
+                        )
+                        factory_contract_count = cur.fetchone()[0]
+
+                        cur.execute(
+                            """
+                            SELECT COUNT(*)
+                            FROM pd_contracts c
+                            JOIN pd_contract_products p ON p.contract_id = c.id
+                            WHERE c.smelter_company = %s
+                              AND p.product_name = %s
+                            """,
+                            (factory_name, product_name),
+                        )
+                        product_match_count = cur.fetchone()[0]
+
+                        cur.execute(
+                            """
+                            SELECT COUNT(*)
+                            FROM pd_contracts c
+                            JOIN pd_contract_products p ON p.contract_id = c.id
+                            WHERE c.smelter_company = %s
+                              AND p.product_name = %s
+                              AND c.status = '生效中'
+                            """,
+                            (factory_name, product_name),
+                        )
+                        status_match_count = cur.fetchone()[0]
+
+                        cur.execute(
+                            """
+                            SELECT COUNT(*)
+                            FROM pd_contracts c
+                            JOIN pd_contract_products p ON p.contract_id = c.id
+                            WHERE c.smelter_company = %s
+                              AND p.product_name = %s
+                              AND c.status = '生效中'
+                              AND c.contract_date <= %s
+                              AND (c.end_date IS NULL OR c.end_date >= %s)
+                            """,
+                            (factory_name, product_name, effective_date, effective_date),
+                        )
+                        date_match_count = cur.fetchone()[0]
+
+                        cur.execute(
+                            """
+                            SELECT c.contract_no, c.status, c.contract_date, c.end_date, p.product_name, p.unit_price
+                            FROM pd_contracts c
+                            JOIN pd_contract_products p ON p.contract_id = c.id
+                            WHERE c.smelter_company = %s
+                            ORDER BY c.created_at DESC, p.sort_order ASC
+                            LIMIT 5
+                            """,
+                            (factory_name,),
+                        )
+                        candidates = cur.fetchall()
+
+                        logger.warning(
+                            "合同匹配失败: factory=%s, product=%s, effective_date=%s, "
+                            "factory_contract_count=%s, product_match_count=%s, status_match_count=%s, date_match_count=%s, "
+                            "candidate_top5=%s",
+                            factory_name,
+                            product_name,
+                            effective_date,
+                            factory_contract_count,
+                            product_match_count,
+                            status_match_count,
+                            date_match_count,
+                            candidates,
+                        )
                         return None, None, None
 
                     contract_no, unit_price = contract
@@ -121,6 +209,13 @@ class DeliveryService:
                         total = Decimal(str(unit_price)) * Decimal(str(quantity))
                     else:
                         total = None
+
+                    logger.info(
+                        "合同匹配成功: contract_no=%s, unit_price=%s, total_amount=%s",
+                        contract_no,
+                        unit_price,
+                        total,
+                    )
 
                     return contract_no, float(unit_price) if unit_price else None, float(total) if total else None
 
