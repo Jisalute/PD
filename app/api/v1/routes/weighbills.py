@@ -270,6 +270,19 @@ async def upload_weighbill(
                 result["data"]["payment_detail_id"] = payment_result.get("id") if isinstance(payment_result,
                                                                                              dict) else None
 
+                # 自动生成结余明细（不阻断主流程）
+                try:
+                    from app.services.balance_service import get_balance_service
+
+                    balance_service = get_balance_service()
+                    balance_result = balance_service.generate_balance_details(weighbill_id=weighbill_id)
+                    result["data"]["balance_generated"] = balance_result.get("success", False)
+                    result["data"]["balance_generated_count"] = len(balance_result.get("data", []))
+                except Exception as e:
+                    logger.warning(f"自动生成结余明细失败: {e}")
+                    result["data"]["balance_generated"] = False
+                    result["data"]["balance_generated_error"] = str(e)
+
             except Exception as e:
                 logger.error(f"自动创建收款明细失败: {e}", exc_info=True)
                 result["data"]["payment_detail_created"] = False
@@ -378,6 +391,19 @@ async def modify_weighbill(
                 )
                 
                 result["data"]["payment_detail_updated"] = True
+
+                # 自动生成结余明细（不阻断主流程）
+                try:
+                    from app.services.balance_service import get_balance_service
+
+                    balance_service = get_balance_service()
+                    balance_result = balance_service.generate_balance_details(weighbill_id=weighbill_id)
+                    result["data"]["balance_generated"] = balance_result.get("success", False)
+                    result["data"]["balance_generated_count"] = len(balance_result.get("data", []))
+                except Exception as e:
+                    logger.warning(f"自动生成结余明细失败: {e}")
+                    result["data"]["balance_generated"] = False
+                    result["data"]["balance_generated_error"] = str(e)
                 
             except Exception as e:
                 logger.warning(f"更新收款明细失败: {e}")
