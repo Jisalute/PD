@@ -493,7 +493,7 @@ class DeliveryService:
             is_last_delivery = match_result['is_last_delivery']
 
             # 计算总价
-            total_amount = float(unit_price * quantity) if (unit_price and quantity) else None
+            total_amount = float(Decimal(str(unit_price)) * quantity) if (unit_price and quantity) else None
 
             logger.info(f"【DEBUG】匹配成功: contract_no={contract_no}, "
                        f"unit_price={unit_price}, is_last_delivery={is_last_delivery}, "
