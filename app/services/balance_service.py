@@ -64,9 +64,9 @@ class BalanceService:
                     if contract_no:
                         conditions.append("w.contract_no = %s")
                         params.append(contract_no)
-                    if delivery_id:
-                        conditions.append("w.delivery_id = %s")
-                        params.append(delivery_id)
+                        if delivery_id:
+                            conditions.append("w.delivery_id = %s")
+                            params.append(delivery_id)
                     if weighbill_id:
                         conditions.append("w.id = %s")
                         params.append(weighbill_id)
@@ -1683,7 +1683,7 @@ class BalanceService:
                             item['target_factory_name'] = delivery.get('target_factory_name')
                             item['driver_id_card'] = delivery.get('driver_id_card')
                             item['shipper'] = delivery.get('shipper')
-                            item['reporter_name'] = delivery.get('reporter_name')
+                            item['reporter_name'] = delivery.get('shipper')
                             item['service_fee'] = delivery.get('service_fee', 0)
                             item['has_delivery_order'] = has_order
                             item['has_delivery_order_display'] = '是' if has_order == '有' else '否'
@@ -1705,7 +1705,7 @@ class BalanceService:
                             'driver_id_card': delivery.get('driver_id_card'),
                             'vehicle_no': delivery.get('vehicle_no'),
                             'shipper': delivery.get('shipper'),
-                            'reporter_name': delivery.get('reporter_name'),
+                            'reporter_name': delivery.get('shipper'),
                             'warehouse': delivery.get('warehouse'),
                             'has_delivery_order': has_order,
                             'has_delivery_order_display': '是' if has_order == '有' else '否',
@@ -1760,7 +1760,7 @@ class BalanceService:
                     params = []
 
                     if reporter_name:
-                        where_clauses.append("COALESCE(d.reporter_name, d.shipper) = %s")
+                        where_clauses.append("d.shipper = %s")
                         params.append(reporter_name)
 
                     if payment_status is not None:
@@ -1779,7 +1779,7 @@ class BalanceService:
                         for token in tokens:
                             like = f"%{token}%"
                             or_clauses.append(
-                                "(COALESCE(d.reporter_name, d.shipper) LIKE %s "
+                                "(d.shipper LIKE %s "
                                 "OR b.driver_phone LIKE %s OR b.vehicle_no LIKE %s OR b.contract_no LIKE %s)"
                             )
                             params.extend([like, like, like, like])
@@ -1790,11 +1790,11 @@ class BalanceService:
 
                     count_sql = f"""
                         SELECT COUNT(*) FROM (
-                            SELECT COALESCE(d.reporter_name, d.shipper) as reporter_name
+                            SELECT d.shipper as reporter_name
                             FROM pd_balance_details b
                             LEFT JOIN pd_deliveries d ON d.id = b.delivery_id
                             WHERE {where_sql}
-                            GROUP BY COALESCE(d.reporter_name, d.shipper)
+                            GROUP BY d.shipper
                         ) t
                     """
                     cur.execute(count_sql, tuple(params))
@@ -1803,7 +1803,7 @@ class BalanceService:
                     offset = (page - 1) * page_size
                     query_sql = f"""
                         SELECT 
-                            COALESCE(d.reporter_name, d.shipper) as reporter_name,
+                            d.shipper as reporter_name,
                             COUNT(*) as bill_count,
                             SUM(b.payable_amount) as total_payable,
                             SUM(b.paid_amount) as total_paid,
@@ -1817,7 +1817,7 @@ class BalanceService:
                         FROM pd_balance_details b
                         LEFT JOIN pd_deliveries d ON d.id = b.delivery_id
                         WHERE {where_sql}
-                        GROUP BY COALESCE(d.reporter_name, d.shipper)
+                        GROUP BY d.shipper
                         ORDER BY total_balance DESC, last_bill_date DESC
                         LIMIT %s OFFSET %s
                     """
