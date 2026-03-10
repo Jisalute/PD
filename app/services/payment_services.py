@@ -891,7 +891,7 @@ class PaymentService:
                         where_clauses.append("wb.payment_schedule_date IS NULL")
 
                 if keyword:
-                    payee_filter = "pd.payee" if has_payee else "d.payee"
+                    payee_filter = "COALESCE(pd.payee, d.payee)" if has_payee else "d.payee"
                     where_clauses.append(
                         f"(pd.contract_no LIKE %s OR pd.smelter_name LIKE %s OR wb.weigh_ticket_no LIKE %s OR d.driver_name LIKE %s OR {payee_filter} LIKE %s)")
                     keyword_pattern = f"%{keyword}%"
@@ -913,7 +913,7 @@ class PaymentService:
 
                 # 分页查询 - 打款信息列表字段
                 offset = (page - 1) * size
-                payee_select = "pd.payee" if has_payee else "d.payee"
+                payee_select = "COALESCE(pd.payee, d.payee)" if has_payee else "d.payee"
                 payee_account_select = "pd.payee_account" if has_payee_account else "NULL"
                 is_paid_out_select = "pd.is_paid_out" if has_is_paid_out else "0"
                 query_sql = f"""
@@ -944,6 +944,10 @@ class PaymentService:
                         pd.paid_amount as 已打款金额,  -- 注意：这里用paid_amount表示已打款
                         {payee_select} as 收款人,
                         {payee_account_select} as 收款人账号,
+                        CASE
+                            WHEN d.has_delivery_order = '无' THEN COALESCE(d.service_fee, 150)
+                            ELSE COALESCE(d.service_fee, 0)
+                        END as 联单费,
                         
                         -- ========== 第五行：回款信息（辅助） ==========
                         pd.arrival_payment_amount as 应回款首笔金额,
@@ -1007,7 +1011,7 @@ class PaymentService:
                             item[field] = str(item[field])
                     
                     # 格式化金额（保留2位小数）
-                    amount_fields = ['净重', '采购单价', '应打款金额', '已打款金额', '未打款金额',
+                    amount_fields = ['净重', '采购单价', '应打款金额', '已打款金额', '未打款金额', '联单费',
                                    '应回款首笔金额', '应回款尾款金额', '已回款首笔金额', '已回款尾款金额']
                     for field in amount_fields:
                         if item.get(field) is not None:
