@@ -632,6 +632,7 @@ def get_role_templates(current_user: dict = Depends(get_current_user)):
 
     # 从数据库获取模板
     templates_data = PermissionService.get_all_role_templates()
+    permission_fields = PermissionService.get_all_fields()
 
     templates = {}
     for role, perms in templates_data.items():
@@ -640,6 +641,7 @@ def get_role_templates(current_user: dict = Depends(get_current_user)):
             'permissions': [
                 {
                     'field': field,
+                    'label': PermissionService.get_label(field),
                     'label': PermissionService.get_label(field),
                     'value': bool(perms.get(field, 0))
                 }
@@ -654,6 +656,7 @@ def get_role_templates(current_user: dict = Depends(get_current_user)):
         "permission_fields": [
             {
                 'field': field,
+                'label': PermissionService.get_label(field)
                 'label': PermissionService.get_label(field)
             }
             for field in PermissionService.get_all_fields()
