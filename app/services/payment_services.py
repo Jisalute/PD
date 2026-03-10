@@ -228,12 +228,8 @@ class PaymentService:
                     if material_name:
                         update_fields.append("material_name = %s")
                         params.append(material_name)
-                    if payee:
-                        update_fields.append("payee = %s")
-                        params.append(payee)
-                    if payee_account:
-                        update_fields.append("payee_account = %s")
-                        params.append(payee_account)
+                    # payee/payee_account 属于打款域，统一由 pd_balance_details 维护，
+                    # 这里不再写入 pd_payment_details，避免双写不同步。
 
                     update_fields.append("updated_at = %s")
                     params.append(datetime.now())
@@ -303,7 +299,6 @@ class PaymentService:
                         "status": int(PaymentStatus.UNPAID),
                         "collection_status": 0,
                         "is_paid": 0,
-                        "is_paid_out": 0,
                         "weighbill_id": weighbill_id,
                         "created_by": created_by,
                         "created_at": datetime.now(),
@@ -424,7 +419,6 @@ class PaymentService:
                     "unpaid_amount": float(total_amount),
                     "status": int(PaymentStatus.UNPAID),
                     "is_paid": 0,           # 未回款
-                    "is_paid_out": 0,       # 待打款
                     "created_by": created_by,
                     "created_at": datetime.now(),
                     "updated_at": datetime.now()
@@ -606,7 +600,7 @@ class PaymentService:
             with conn.cursor() as cur:
                 # 检查收款明细是否存在
                 cur.execute(
-                    f"SELECT id, is_paid, is_paid_out FROM {PaymentService.TABLE_NAME} WHERE id=%s",
+                    f"SELECT id, weighbill_id, is_paid FROM {PaymentService.TABLE_NAME} WHERE id=%s",
                     (payment_id,)
                 )
                 existing = cur.fetchone()
@@ -622,28 +616,42 @@ class PaymentService:
                     update_fields.append("is_paid = %s")
                     params.append(is_paid)
                 
-                if is_paid_out is not None:
-                    update_fields.append("is_paid_out = %s")
-                    params.append(is_paid_out)
-                
-                if not update_fields:
+                # is_paid_out 属于打款域，不再写 pd_payment_details，改写到 pd_balance_details.payout_status
+                if not update_fields and is_paid_out is None:
                     return {
                         "payment_id": payment_id,
                         "is_paid": existing.get("is_paid"),
-                        "is_paid_out": existing.get("is_paid_out"),
+                        "is_paid_out": None,
                         "message": "无更新内容"
                     }
                 
-                update_fields.append("updated_at = %s")
-                params.append(datetime.now())
-                params.append(payment_id)
-                
-                update_sql = f"""
-                    UPDATE {_quote_identifier(PaymentService.TABLE_NAME)}
-                    SET {', '.join(update_fields)}
-                    WHERE id = %s
-                """
-                cur.execute(update_sql, tuple(params))
+                if update_fields:
+                    update_fields.append("updated_at = %s")
+                    params.append(datetime.now())
+                    params.append(payment_id)
+
+                    update_sql = f"""
+                        UPDATE {_quote_identifier(PaymentService.TABLE_NAME)}
+                        SET {', '.join(update_fields)}
+                        WHERE id = %s
+                    """
+                    cur.execute(update_sql, tuple(params))
+
+                resolved_is_paid_out = None
+                if is_paid_out is not None:
+                    weighbill_id = existing.get("weighbill_id")
+                    if weighbill_id:
+                        cur.execute(
+                            "UPDATE pd_balance_details SET payout_status = %s, updated_at = %s WHERE weighbill_id = %s",
+                            (is_paid_out, datetime.now(), weighbill_id)
+                        )
+                        cur.execute(
+                            "SELECT payout_status FROM pd_balance_details WHERE weighbill_id = %s LIMIT 1",
+                            (weighbill_id,)
+                        )
+                        b_row = cur.fetchone()
+                        if b_row:
+                            resolved_is_paid_out = b_row.get("payout_status")
                 conn.commit()
                 
                 logger.info(f"手动更新付款状态: ID={payment_id}, is_paid={is_paid}, is_paid_out={is_paid_out}")
@@ -651,7 +659,7 @@ class PaymentService:
                 return {
                     "payment_id": payment_id,
                     "is_paid": is_paid if is_paid is not None else existing.get("is_paid"),
-                    "is_paid_out": is_paid_out if is_paid_out is not None else existing.get("is_paid_out"),
+                    "is_paid_out": resolved_is_paid_out,
                     "message": "状态更新成功"
                 }
 
@@ -846,7 +854,6 @@ class PaymentService:
                 columns = [r["Field"] for r in cur.fetchall()]
                 has_payee = "payee" in columns
                 has_payee_account = "payee_account" in columns
-                has_is_paid_out = "is_paid_out" in columns
 
                 # 构建WHERE条件 - 必须已排期
                 where_clauses = ["wb.payment_schedule_date IS NOT NULL"]  # 必须已排期
@@ -874,10 +881,7 @@ class PaymentService:
 
                 # 打款状态筛选
                 if is_paid_out is not None:
-                    if has_is_paid_out:
-                        where_clauses.append("COALESCE(b.payout_status, pd.is_paid_out, 0) = %s")
-                    else:
-                        where_clauses.append("COALESCE(b.payout_status, 0) = %s")
+                    where_clauses.append("COALESCE(b.payout_status, 0) = %s")
                     params.append(is_paid_out)
 
                 # 排期日期筛选
@@ -917,7 +921,7 @@ class PaymentService:
                 offset = (page - 1) * size
                 payee_select = "COALESCE(b.payee_name, pd.payee, d.payee)" if has_payee else "COALESCE(b.payee_name, d.payee)"
                 payee_account_select = "COALESCE(b.payee_account, pd.payee_account)" if has_payee_account else "b.payee_account"
-                is_paid_out_select = "COALESCE(b.payout_status, pd.is_paid_out, 0)" if has_is_paid_out else "COALESCE(b.payout_status, 0)"
+                is_paid_out_select = "COALESCE(b.payout_status, 0)"
                 query_sql = f"""
                     SELECT 
                         -- ========== 第一行：排期信息 ==========
