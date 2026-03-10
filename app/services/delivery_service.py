@@ -925,6 +925,7 @@ class DeliveryService:
 
     def list_deliveries(
             self,
+            exact_delivery_id: int = None,
             exact_shipper: str = None,
             exact_contract_no: str = None,
             exact_report_date: str = None,
@@ -949,6 +950,10 @@ class DeliveryService:
                 with conn.cursor() as cur:
                     where_clauses = []
                     params = []
+
+                    if exact_delivery_id is not None:
+                        where_clauses.append("id = %s")
+                        params.append(exact_delivery_id)
 
                     if exact_shipper:
                         where_clauses.append("shipper = %s")
@@ -983,7 +988,7 @@ class DeliveryService:
                         where_clauses.append("reporter_name = %s")
                         params.append(exact_reporter_name)
 
-                    if exact_reporter_id:
+                    if exact_reporter_id is not None:
                         where_clauses.append("reporter_id = %s")
                         params.append(exact_reporter_id)
 

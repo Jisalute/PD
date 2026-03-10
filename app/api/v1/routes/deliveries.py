@@ -212,6 +212,7 @@ async def create_delivery_json(
         raise HTTPException(status_code=500, detail=str(e))
 @router.get("/", response_model=dict)
 async def list_deliveries(
+    exact_delivery_id: Optional[int] = Query(None, description="精确报单ID"),
     exact_shipper: Optional[str] = Query(None, description="精确发货人/报单人"),
     exact_contract_no: Optional[str] = Query(None, description="精确合同编号"),
     exact_report_date: Optional[str] = Query(None, description="精确报单日期"),
@@ -233,6 +234,7 @@ async def list_deliveries(
 ):
     """查询报货订单列表"""
     return service.list_deliveries(
+        exact_delivery_id=exact_delivery_id,
         exact_shipper=exact_shipper,
         exact_contract_no=exact_contract_no,
         exact_report_date=exact_report_date,
