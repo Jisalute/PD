@@ -201,6 +201,98 @@ class BalanceService:
             logger.error(f"重新计算结余失败: {e}")
             return {"success": False, "error": str(e)}
 
+    def resolve_balance_id(
+        self,
+        balance_id: Optional[int] = None,
+        payment_detail_id: Optional[int] = None,
+        delivery_id: Optional[int] = None,
+        contract_no: Optional[str] = None,
+        vehicle_no: Optional[str] = None,
+        driver_phone: Optional[str] = None,
+    ) -> int:
+        """根据已知标识自动匹配唯一结余明细。"""
+        normalized_contract_no = contract_no.strip() if isinstance(contract_no, str) and contract_no.strip() else None
+        normalized_vehicle_no = vehicle_no.strip() if isinstance(vehicle_no, str) and vehicle_no.strip() else None
+        normalized_driver_phone = driver_phone.strip() if isinstance(driver_phone, str) and driver_phone.strip() else None
+
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                if balance_id and balance_id > 0:
+                    cur.execute("SELECT id FROM pd_balance_details WHERE id = %s", (balance_id,))
+                    row = cur.fetchone()
+                    if row:
+                        return int(row[0] if not isinstance(row, dict) else row["id"])
+
+                if payment_detail_id and payment_detail_id > 0:
+                    cur.execute(
+                        """
+                        SELECT b.id
+                        FROM pd_payment_details pd
+                        JOIN pd_balance_details b
+                          ON (
+                              (pd.weighbill_id IS NOT NULL AND b.weighbill_id = pd.weighbill_id)
+                              OR (pd.delivery_id IS NOT NULL AND b.delivery_id = pd.delivery_id)
+                              OR (pd.sales_order_id IS NOT NULL AND b.delivery_id = pd.sales_order_id)
+                          )
+                        WHERE pd.id = %s
+                        ORDER BY
+                          CASE
+                            WHEN pd.weighbill_id IS NOT NULL AND b.weighbill_id = pd.weighbill_id THEN 0
+                            WHEN pd.delivery_id IS NOT NULL AND b.delivery_id = pd.delivery_id THEN 1
+                            ELSE 2
+                          END,
+                          b.id DESC
+                        LIMIT 2
+                        """,
+                        (payment_detail_id,),
+                    )
+                    rows = cur.fetchall()
+                    if len(rows) == 1:
+                        row = rows[0]
+                        return int(row[0] if not isinstance(row, dict) else row["id"])
+                    if len(rows) > 1:
+                        raise ValueError("匹配到多条打款明细，请补充报单ID、车号或司机电话后重试")
+
+                where_clauses = ["1=1"]
+                params = []
+
+                if delivery_id:
+                    where_clauses.append("b.delivery_id = %s")
+                    params.append(delivery_id)
+                if normalized_contract_no:
+                    where_clauses.append("b.contract_no = %s")
+                    params.append(normalized_contract_no)
+                if normalized_vehicle_no:
+                    where_clauses.append("b.vehicle_no = %s")
+                    params.append(normalized_vehicle_no)
+                if normalized_driver_phone:
+                    where_clauses.append("b.driver_phone = %s")
+                    params.append(normalized_driver_phone)
+
+                if len(where_clauses) == 1:
+                    raise ValueError("缺少打款匹配条件，请至少提供结余ID、收款明细ID、报单ID、合同编号、车号或司机电话中的一个")
+
+                cur.execute(
+                    f"""
+                    SELECT b.id
+                    FROM pd_balance_details b
+                    WHERE {' AND '.join(where_clauses)}
+                    ORDER BY
+                      CASE WHEN b.payment_status IN (0, 1) THEN 0 ELSE 1 END,
+                      b.id DESC
+                    LIMIT 2
+                    """,
+                    tuple(params),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    raise ValueError("未找到匹配的打款明细")
+                if len(rows) > 1:
+                    raise ValueError("匹配到多条打款明细，请补充报单ID、车号或司机电话后重试")
+
+                row = rows[0]
+                return int(row[0] if not isinstance(row, dict) else row["id"])
+
     # ========== 支付回单OCR（待完善） ==========
 
     def preprocess_image(self, image_path: str) -> str:
@@ -1763,11 +1855,16 @@ class BalanceService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    reporter_expr = (
+                        "COALESCE(NULLIF(TRIM(d.reporter_name), ''), "
+                        "NULLIF(TRIM(d.shipper), ''), "
+                        "CONCAT('未关联发货人#', b.delivery_id))"
+                    )
                     where_clauses = ["1=1"]
                     params = []
 
                     if reporter_name:
-                        where_clauses.append("d.shipper = %s")
+                        where_clauses.append(f"{reporter_expr} = %s")
                         params.append(reporter_name)
 
                     if payment_status is not None:
@@ -1786,7 +1883,7 @@ class BalanceService:
                         for token in tokens:
                             like = f"%{token}%"
                             or_clauses.append(
-                                "(d.shipper LIKE %s "
+                                f"({reporter_expr} LIKE %s "
                                 "OR b.driver_phone LIKE %s OR b.vehicle_no LIKE %s OR b.contract_no LIKE %s)"
                             )
                             params.extend([like, like, like, like])
@@ -1797,11 +1894,11 @@ class BalanceService:
 
                     count_sql = f"""
                         SELECT COUNT(*) FROM (
-                            SELECT d.shipper as reporter_name
+                            SELECT {reporter_expr} as reporter_name
                             FROM pd_balance_details b
                             LEFT JOIN pd_deliveries d ON d.id = b.delivery_id
                             WHERE {where_sql}
-                            GROUP BY d.shipper
+                            GROUP BY {reporter_expr}
                         ) t
                     """
                     cur.execute(count_sql, tuple(params))
@@ -1810,7 +1907,7 @@ class BalanceService:
                     offset = (page - 1) * page_size
                     query_sql = f"""
                         SELECT 
-                            d.shipper as reporter_name,
+                            {reporter_expr} as reporter_name,
                             COUNT(*) as bill_count,
                             SUM(b.payable_amount) as total_payable,
                             SUM(b.paid_amount) as total_paid,
@@ -1824,7 +1921,7 @@ class BalanceService:
                         FROM pd_balance_details b
                         LEFT JOIN pd_deliveries d ON d.id = b.delivery_id
                         WHERE {where_sql}
-                        GROUP BY d.shipper
+                        GROUP BY {reporter_expr}
                         ORDER BY total_balance DESC, last_bill_date DESC
                         LIMIT %s OFFSET %s
                     """
@@ -2010,7 +2107,12 @@ class BalanceService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    where_sql = "COALESCE(d.reporter_name, d.shipper) = %s"
+                    reporter_expr = (
+                        "COALESCE(NULLIF(TRIM(d.reporter_name), ''), "
+                        "NULLIF(TRIM(d.shipper), ''), "
+                        "CONCAT('未关联发货人#', b.delivery_id))"
+                    )
+                    where_sql = f"{reporter_expr} = %s"
                     params = [reporter_name]
 
                     if payment_status is not None:
@@ -2019,7 +2121,7 @@ class BalanceService:
 
                     cur.execute(f"""
                         SELECT 
-                            COALESCE(d.reporter_name, d.shipper) as reporter_name,
+                            {reporter_expr} as reporter_name,
                             COUNT(*) as total_bills,
                             SUM(b.payable_amount) as total_payable,
                             SUM(b.paid_amount) as total_paid,
@@ -2027,7 +2129,7 @@ class BalanceService:
                         FROM pd_balance_details b
                         LEFT JOIN pd_deliveries d ON d.id = b.delivery_id
                         WHERE {where_sql}
-                        GROUP BY COALESCE(d.reporter_name, d.shipper)
+                        GROUP BY {reporter_expr}
                     """, tuple(params))
 
                     summary_row = cur.fetchone()
