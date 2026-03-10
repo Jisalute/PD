@@ -940,7 +940,14 @@ class PaymentService:
                         
                         -- ========== 第四行：打款信息（核心） ==========
                         wb.unit_price as 采购单价,
-                        wb.total_amount as 应打款金额,
+                        GREATEST(
+                            COALESCE(b.payable_amount, wb.total_amount, pd.total_amount, 0) -
+                            CASE
+                                WHEN d.has_delivery_order = '无' THEN COALESCE(d.service_fee, 150)
+                                ELSE COALESCE(d.service_fee, 0)
+                            END,
+                            0
+                        ) as 应打款金额,
                         pd.paid_amount as 已打款金额,  -- 注意：这里用paid_amount表示已打款
                         {payee_select} as 收款人,
                         {payee_account_select} as 收款人账号,
@@ -978,8 +985,6 @@ class PaymentService:
                         pd.created_at,
                         pd.updated_at,
 
-                        -- 磅单ID（关联用）
-                        wb.id as weighbill_id,
                         wb.gross_weight,
                         wb.tare_weight,
                         wb.weighbill_image,
@@ -991,6 +996,7 @@ class PaymentService:
                     FROM {PaymentService.TABLE_NAME} pd
                     LEFT JOIN pd_deliveries d ON d.id = pd.delivery_id
                     LEFT JOIN pd_weighbills wb ON wb.id = pd.weighbill_id
+                    LEFT JOIN pd_balance_details b ON b.weighbill_id = wb.id
                     WHERE {where_sql}
                     ORDER BY pd.created_at DESC
                     LIMIT %s OFFSET %s
