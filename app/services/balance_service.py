@@ -1763,11 +1763,16 @@ class BalanceService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    reporter_expr = (
+                        "COALESCE(NULLIF(TRIM(d.reporter_name), ''), "
+                        "NULLIF(TRIM(d.shipper), ''), "
+                        "CONCAT('未关联发货人#', b.delivery_id))"
+                    )
                     where_clauses = ["1=1"]
                     params = []
 
                     if reporter_name:
-                        where_clauses.append("d.shipper = %s")
+                        where_clauses.append(f"{reporter_expr} = %s")
                         params.append(reporter_name)
 
                     if payment_status is not None:
@@ -1786,7 +1791,7 @@ class BalanceService:
                         for token in tokens:
                             like = f"%{token}%"
                             or_clauses.append(
-                                "(d.shipper LIKE %s "
+                                f"({reporter_expr} LIKE %s "
                                 "OR b.driver_phone LIKE %s OR b.vehicle_no LIKE %s OR b.contract_no LIKE %s)"
                             )
                             params.extend([like, like, like, like])
@@ -1797,11 +1802,11 @@ class BalanceService:
 
                     count_sql = f"""
                         SELECT COUNT(*) FROM (
-                            SELECT d.shipper as reporter_name
+                            SELECT {reporter_expr} as reporter_name
                             FROM pd_balance_details b
                             LEFT JOIN pd_deliveries d ON d.id = b.delivery_id
                             WHERE {where_sql}
-                            GROUP BY d.shipper
+                            GROUP BY {reporter_expr}
                         ) t
                     """
                     cur.execute(count_sql, tuple(params))
@@ -1810,7 +1815,7 @@ class BalanceService:
                     offset = (page - 1) * page_size
                     query_sql = f"""
                         SELECT 
-                            d.shipper as reporter_name,
+                            {reporter_expr} as reporter_name,
                             COUNT(*) as bill_count,
                             SUM(b.payable_amount) as total_payable,
                             SUM(b.paid_amount) as total_paid,
@@ -1824,7 +1829,7 @@ class BalanceService:
                         FROM pd_balance_details b
                         LEFT JOIN pd_deliveries d ON d.id = b.delivery_id
                         WHERE {where_sql}
-                        GROUP BY d.shipper
+                        GROUP BY {reporter_expr}
                         ORDER BY total_balance DESC, last_bill_date DESC
                         LIMIT %s OFFSET %s
                     """
@@ -2010,7 +2015,12 @@ class BalanceService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    where_sql = "COALESCE(d.reporter_name, d.shipper) = %s"
+                    reporter_expr = (
+                        "COALESCE(NULLIF(TRIM(d.reporter_name), ''), "
+                        "NULLIF(TRIM(d.shipper), ''), "
+                        "CONCAT('未关联发货人#', b.delivery_id))"
+                    )
+                    where_sql = f"{reporter_expr} = %s"
                     params = [reporter_name]
 
                     if payment_status is not None:
@@ -2019,7 +2029,7 @@ class BalanceService:
 
                     cur.execute(f"""
                         SELECT 
-                            COALESCE(d.reporter_name, d.shipper) as reporter_name,
+                            {reporter_expr} as reporter_name,
                             COUNT(*) as total_bills,
                             SUM(b.payable_amount) as total_payable,
                             SUM(b.paid_amount) as total_paid,
@@ -2027,7 +2037,7 @@ class BalanceService:
                         FROM pd_balance_details b
                         LEFT JOIN pd_deliveries d ON d.id = b.delivery_id
                         WHERE {where_sql}
-                        GROUP BY COALESCE(d.reporter_name, d.shipper)
+                        GROUP BY {reporter_expr}
                     """, tuple(params))
 
                     summary_row = cur.fetchone()
