@@ -36,6 +36,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"数据库初始化失败: {e}")
         logger.exception("database init failed")
+    expired_count = expire_contracts_after_grace()
+    logger.info("contract expire sync finished updated=%s", expired_count)
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(
         func=expire_contracts_after_grace,

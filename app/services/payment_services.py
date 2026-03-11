@@ -287,6 +287,14 @@ class PaymentService:
     RECORD_TABLE = "pd_payment_records"
 
     @staticmethod
+    def _service_fee_sql() -> str:
+        return "CASE WHEN d.has_delivery_order = '无' THEN COALESCE(d.service_fee, 150) ELSE COALESCE(d.service_fee, 0) END"
+
+    @staticmethod
+    def _payout_base_amount_sql() -> str:
+        return "ROUND((COALESCE(wb.unit_price, 0) * COALESCE(wb.net_weight, 0)) / 1.03, 2)"
+
+    @staticmethod
     def resolve_payment_detail_id(
         payment_detail_id: Optional[int] = None,
         weighbill_id: Optional[int] = None,
@@ -970,20 +978,23 @@ class PaymentService:
                     cur.execute(update_sql, tuple(params))
 
                 resolved_is_paid_out = None
+                resolved_payout_date = None
                 if is_paid_out is not None:
                     weighbill_id = existing.get("weighbill_id")
                     if weighbill_id:
+                        payout_date = datetime.now().date() if int(is_paid_out) == 1 else None
                         cur.execute(
-                            "UPDATE pd_balance_details SET payout_status = %s, updated_at = %s WHERE weighbill_id = %s",
-                            (is_paid_out, datetime.now(), weighbill_id)
+                            "UPDATE pd_balance_details SET payout_status = %s, payout_date = %s, updated_at = %s WHERE weighbill_id = %s",
+                            (is_paid_out, payout_date, datetime.now(), weighbill_id)
                         )
                         cur.execute(
-                            "SELECT payout_status FROM pd_balance_details WHERE weighbill_id = %s LIMIT 1",
+                            "SELECT payout_status, payout_date FROM pd_balance_details WHERE weighbill_id = %s LIMIT 1",
                             (weighbill_id,)
                         )
                         b_row = cur.fetchone()
                         if b_row:
                             resolved_is_paid_out = b_row.get("payout_status")
+                            resolved_payout_date = str(b_row.get("payout_date")) if b_row.get("payout_date") else None
                 conn.commit()
                 
                 logger.info(f"手动更新付款状态: ID={payment_id}, is_paid={is_paid}, is_paid_out={is_paid_out}")
@@ -992,6 +1003,7 @@ class PaymentService:
                     "payment_id": payment_id,
                     "is_paid": is_paid if is_paid is not None else existing.get("is_paid"),
                     "is_paid_out": resolved_is_paid_out,
+                    "payout_date": resolved_payout_date,
                     "message": "状态更新成功"
                 }
 
@@ -1187,6 +1199,14 @@ class PaymentService:
                 has_payee = "payee" in columns
                 has_payee_account = "payee_account" in columns
 
+                cur.execute("SHOW COLUMNS FROM pd_weighbills")
+                weighbill_columns = [r["Field"] for r in cur.fetchall()]
+                has_weighbill_warehouse_name = "warehouse_name" in weighbill_columns
+
+                cur.execute("SHOW COLUMNS FROM pd_balance_details")
+                balance_columns = [r["Field"] for r in cur.fetchall()]
+                has_balance_payee_bank_name = "payee_bank_name" in balance_columns
+
                 # 构建WHERE条件 - 必须已排期
                 where_clauses = ["wb.payment_schedule_date IS NOT NULL"]  # 必须已排期
                 params = []
@@ -1252,7 +1272,21 @@ class PaymentService:
                 # 分页查询 - 打款信息列表字段
                 offset = (page - 1) * size
                 payee_select = "COALESCE(b.payee_name, pd.payee, d.payee)" if has_payee else "COALESCE(b.payee_name, d.payee)"
-                payee_account_select = "COALESCE(b.payee_account, pd.payee_account)" if has_payee_account else "b.payee_account"
+                warehouse_select = "COALESCE(wb.warehouse_name, d.warehouse)" if has_weighbill_warehouse_name else "d.warehouse"
+                warehouse_payee_account_select = f"(SELECT wp.payee_account FROM pd_warehouse_payees wp WHERE wp.warehouse_name = {warehouse_select} AND wp.payee_name = {payee_select} AND wp.is_active = 1 ORDER BY wp.id ASC LIMIT 1)"
+                warehouse_payee_bank_select = f"(SELECT wp.payee_bank_name FROM pd_warehouse_payees wp WHERE wp.warehouse_name = {warehouse_select} AND wp.payee_name = {payee_select} AND wp.is_active = 1 ORDER BY wp.id ASC LIMIT 1)"
+                service_fee_select = PaymentService._service_fee_sql()
+                payout_base_amount_select = f"COALESCE(b.payable_amount, {PaymentService._payout_base_amount_sql()})"
+                payout_amount_select = f"GREATEST({payout_base_amount_select} - ({service_fee_select}), 0)"
+                unpaid_amount_select = f"GREATEST({payout_amount_select} - COALESCE(b.paid_amount, 0), 0)"
+                if has_payee_account:
+                    payee_account_select = f"COALESCE(b.payee_account, pd.payee_account, {warehouse_payee_account_select})"
+                else:
+                    payee_account_select = f"COALESCE(b.payee_account, {warehouse_payee_account_select})"
+                if has_balance_payee_bank_name:
+                    payee_bank_select = f"COALESCE(b.payee_bank_name, {warehouse_payee_bank_select})"
+                else:
+                    payee_bank_select = warehouse_payee_bank_select
                 is_paid_out_select = "COALESCE(b.payout_status, 0)"
                 query_sql = f"""
                     SELECT 
@@ -1270,6 +1304,7 @@ class PaymentService:
                         d.has_delivery_order as 是否自带联单,
                         d.upload_status as 是否上传联单,
                         d.shipper as 报单人发货人,
+                        {warehouse_select} as 仓库,
                         
                         -- ========== 第三行：磅单信息 ==========
                         wb.weigh_date as 磅单日期,
@@ -1278,21 +1313,12 @@ class PaymentService:
                         
                         -- ========== 第四行：打款信息（核心） ==========
                         wb.unit_price as 采购单价,
-                        GREATEST(
-                            COALESCE(b.payable_amount, wb.total_amount, pd.total_amount, 0) -
-                            CASE
-                                WHEN d.has_delivery_order = '无' THEN COALESCE(d.service_fee, 150)
-                                ELSE COALESCE(d.service_fee, 0)
-                            END,
-                            0
-                        ) as 应打款金额,
-                        COALESCE(b.paid_amount, pd.paid_amount, 0) as 已打款金额,
+                        {payout_amount_select} as 应打款金额,
+                        COALESCE(b.paid_amount, 0) as 已打款金额,
                         {payee_select} as 收款人,
                         {payee_account_select} as 收款人账号,
-                        CASE
-                            WHEN d.has_delivery_order = '无' THEN COALESCE(d.service_fee, 150)
-                            ELSE COALESCE(d.service_fee, 0)
-                        END as 联单费,
+                        {payee_bank_select} as 收款银行,
+                        {service_fee_select} as 联单费,
                         
                         -- ========== 第五行：回款信息（辅助） ==========
                         pd.arrival_payment_amount as 应回款首笔金额,
@@ -1319,9 +1345,29 @@ class PaymentService:
                         -- ========== 其他必要字段 ==========
                         pd.id as payment_detail_id,
                         b.id as balance_id,
+                        (
+                            SELECT pr.id
+                            FROM pd_receipt_settlements rs
+                            JOIN pd_payment_receipts pr ON pr.id = rs.receipt_id
+                            WHERE rs.balance_id = b.id
+                            ORDER BY pr.created_at DESC, pr.id DESC
+                            LIMIT 1
+                        ) as payment_receipt_id,
+                        (
+                            SELECT GROUP_CONCAT(pr.id ORDER BY pr.created_at DESC, pr.id DESC)
+                            FROM pd_receipt_settlements rs
+                            JOIN pd_payment_receipts pr ON pr.id = rs.receipt_id
+                            WHERE rs.balance_id = b.id
+                        ) as payment_receipt_ids,
+                        (
+                            SELECT COUNT(*)
+                            FROM pd_receipt_settlements rs
+                            JOIN pd_payment_receipts pr ON pr.id = rs.receipt_id
+                            WHERE rs.balance_id = b.id
+                        ) as payment_receipt_count,
                         wb.id as weighbill_id,
                         d.id as delivery_id,
-                        COALESCE(b.balance_amount, pd.unpaid_amount, 0) as 未打款金额,
+                        {unpaid_amount_select} as 未打款金额,
                         pd.created_at,
                         pd.updated_at,
 
@@ -1349,6 +1395,18 @@ class PaymentService:
                 items = []
                 for row in rows:
                     item = dict(row)
+
+                    receipt_ids_raw = item.get('payment_receipt_ids')
+                    if receipt_ids_raw:
+                        item['payment_receipt_ids'] = [int(receipt_id) for receipt_id in str(receipt_ids_raw).split(',') if receipt_id]
+                    else:
+                        item['payment_receipt_ids'] = []
+
+                    if item.get('payment_receipt_id') is not None:
+                        item['payment_receipt_id'] = int(item['payment_receipt_id'])
+
+                    if item.get('payment_receipt_count') is not None:
+                        item['payment_receipt_count'] = int(item['payment_receipt_count'])
                     
                     # 转换时间字段为字符串
                     time_fields = ['排款日期', '打款日期', '报单日期', '磅单日期', '回款日期', 'created_at', 'updated_at']

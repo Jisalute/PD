@@ -60,6 +60,7 @@ class WeighbillUploadRequest(BaseModel):
     net_weight: float
     delivery_time: Optional[str] = None
     unit_price: Optional[float] = None
+    warehouse_name: Optional[str] = None
 
 
 class WeighbillOut(BaseModel):
@@ -93,6 +94,7 @@ class WeighbillOut(BaseModel):
     uploaded_at: Optional[str] = None
     # 报单信息
     report_date: Optional[str] = None
+    warehouse_name: Optional[str] = None
     warehouse: Optional[str] = None
     target_factory_name: Optional[str] = None
     driver_phone: Optional[str] = None
@@ -217,6 +219,7 @@ async def upload_weighbill(
         net_weight: float = Form(..., description="净重"),
         delivery_time: Optional[str] = Form(None, description="送货时间"),
         unit_price: Optional[float] = Form(None, description="单价（不传则自动获取）"),
+        warehouse_name: Optional[str] = Form(None, description="磅单仓库名称"),
         warehouse: Optional[str] = Form(None, description="送货库房"),
         payee: Optional[str] = Form(None, description="收款人"),
         is_manual: bool = Form(False, description="是否人工修正"),
@@ -241,6 +244,7 @@ async def upload_weighbill(
             "net_weight": net_weight,
             "delivery_time": delivery_time,
             "unit_price": final_unit_price,
+            "warehouse_name": warehouse_name,
             "warehouse": warehouse,
             "payee": payee,
         }
@@ -307,6 +311,10 @@ async def upload_weighbill(
                     balance_result = balance_service.generate_balance_details(weighbill_id=weighbill_id)
                     result["data"]["balance_generated"] = balance_result.get("success", False)
                     result["data"]["balance_generated_count"] = len(balance_result.get("data", []))
+                    payee_sync_result = balance_service.sync_balance_payee_info(weighbill_id=weighbill_id)
+                    result["data"]["balance_payee_matched"] = payee_sync_result.get("matched", False)
+                    result["data"]["balance_payee_account"] = payee_sync_result.get("payee_account")
+                    result["data"]["balance_payee_bank_name"] = payee_sync_result.get("payee_bank_name")
                 except Exception as e:
                     logger.warning(f"自动生成结余明细失败: {e}")
                     result["data"]["balance_generated"] = False
@@ -341,6 +349,7 @@ async def modify_weighbill(
         net_weight: Optional[float] = Form(None, description="净重"),
         delivery_time: Optional[str] = Form(None, description="送货时间"),
         unit_price: Optional[float] = Form(None, description="单价"),
+    warehouse_name: Optional[str] = Form(None, description="磅单仓库名称"),
     warehouse: Optional[str] = Form(None, description="送货库房"),
     payee: Optional[str] = Form(None, description="收款人"),
         is_manual: bool = Form(True, description="是否人工修正"),
@@ -358,7 +367,7 @@ async def modify_weighbill(
         data = {}
         fields = ['weigh_date', 'weigh_ticket_no', 'contract_no', 'vehicle_no',
               'gross_weight', 'tare_weight', 'net_weight', 'delivery_time', 'unit_price',
-              'warehouse', 'payee']
+              'warehouse_name', 'warehouse', 'payee']
 
         for f in fields:
             value = locals().get(f)
@@ -435,6 +444,10 @@ async def modify_weighbill(
                     balance_result = balance_service.generate_balance_details(weighbill_id=weighbill_id)
                     result["data"]["balance_generated"] = balance_result.get("success", False)
                     result["data"]["balance_generated_count"] = len(balance_result.get("data", []))
+                    payee_sync_result = balance_service.sync_balance_payee_info(weighbill_id=weighbill_id)
+                    result["data"]["balance_payee_matched"] = payee_sync_result.get("matched", False)
+                    result["data"]["balance_payee_account"] = payee_sync_result.get("payee_account")
+                    result["data"]["balance_payee_bank_name"] = payee_sync_result.get("payee_bank_name")
                 except Exception as e:
                     logger.warning(f"自动生成结余明细失败: {e}")
                     result["data"]["balance_generated"] = False
