@@ -78,22 +78,29 @@ class ContractService:
 
     @classmethod
     def _is_contract_expired(
-        cls,
-        contract_date: Any,
-        end_date: Any,
-        grace_days: int = 5,
-        today: Optional[date] = None,
+            cls,
+            contract_date: Any,
+            end_date: Any,
+            grace_days: int = 4,
+            today: Optional[datetime] = None,
     ) -> bool:
-        current_day = today or date.today()
+        """判断合同是否已失效 - 在起始天数+4天的23:59:59失效"""
+        current_time = today or datetime.now()
+
+        # 如果有明确的截止日期，使用截止日期当天的23:59:59
         end_day = cls._to_date(end_date)
         if end_day is not None:
-            return end_day <= current_day
+            expire_time = datetime.combine(end_day, datetime.strptime("23:59:59", "%H:%M:%S").time())
+            return current_time > expire_time
 
+        # 根据签订日期计算失效时间（签订日期 + 4天 的 23:59:59）
         contract_day = cls._to_date(contract_date)
         if contract_day is None:
             return False
 
-        return contract_day + timedelta(days=grace_days) <= current_day
+        expire_date = contract_day + timedelta(days=grace_days)
+        expire_time = datetime.combine(expire_date, datetime.strptime("23:59:59", "%H:%M:%S").time())
+        return current_time > expire_time
 
     @classmethod
     def _resolve_contract_status(
@@ -101,7 +108,7 @@ class ContractService:
         contract_date: Any,
         end_date: Any,
         current_status: Optional[str] = None,
-        grace_days: int = 5,
+        grace_days: int = 4,
     ) -> str:
         if cls._is_contract_expired(contract_date, end_date, grace_days=grace_days):
             return "已失效"
@@ -864,22 +871,24 @@ class ContractService:
 _contract_service = None
 
 
-def expire_contracts_after_grace(grace_days: int = 5) -> int:
-    """按截止日期零点失效合同；无截止日期时兼容旧规则。"""
+def expire_contracts_after_grace(grace_days: int = 4) -> int:
+    """按截止日期当天23:59:59失效合同；无截止日期时按签订日期+4天的23:59:59失效"""
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
+                # 修改：使用 DATE_ADD 加上 23:59:59 的时间
                 cur.execute(
                     """
                     UPDATE pd_contracts
                     SET status = '已失效'
                     WHERE status = '生效中'
                       AND (
-                        (end_date IS NOT NULL AND end_date <= CURDATE())
+                        (end_date IS NOT NULL 
+                         AND TIMESTAMP(end_date, '23:59:59') <= NOW())
                         OR (
                           end_date IS NULL
                           AND contract_date IS NOT NULL
-                          AND DATE_ADD(contract_date, INTERVAL %s DAY) <= CURDATE()
+                          AND TIMESTAMP(DATE_ADD(contract_date, INTERVAL %s DAY), '23:59:59') <= NOW()
                         )
                       )
                     """,

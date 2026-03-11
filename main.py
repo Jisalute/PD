@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         func=expire_contracts_after_grace,
         trigger=CronTrigger(hour=0, minute=10),
-        kwargs={"grace_days": 5},
+        kwargs={"grace_days": 4},
         id="expire_contracts",
         replace_existing=True,
     )
