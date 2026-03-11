@@ -22,7 +22,7 @@ uv venv
 ```bash
 uv sync
 # 如使用 EmailStr 字段，请确保安装 email-validator
-uv pip install email-validator
+uv add email-validator
 ```
 
 ### 3) 配置环境变量
