@@ -311,6 +311,10 @@ async def upload_weighbill(
                     balance_result = balance_service.generate_balance_details(weighbill_id=weighbill_id)
                     result["data"]["balance_generated"] = balance_result.get("success", False)
                     result["data"]["balance_generated_count"] = len(balance_result.get("data", []))
+                    payee_sync_result = balance_service.sync_balance_payee_info(weighbill_id=weighbill_id)
+                    result["data"]["balance_payee_matched"] = payee_sync_result.get("matched", False)
+                    result["data"]["balance_payee_account"] = payee_sync_result.get("payee_account")
+                    result["data"]["balance_payee_bank_name"] = payee_sync_result.get("payee_bank_name")
                 except Exception as e:
                     logger.warning(f"自动生成结余明细失败: {e}")
                     result["data"]["balance_generated"] = False
@@ -440,6 +444,10 @@ async def modify_weighbill(
                     balance_result = balance_service.generate_balance_details(weighbill_id=weighbill_id)
                     result["data"]["balance_generated"] = balance_result.get("success", False)
                     result["data"]["balance_generated_count"] = len(balance_result.get("data", []))
+                    payee_sync_result = balance_service.sync_balance_payee_info(weighbill_id=weighbill_id)
+                    result["data"]["balance_payee_matched"] = payee_sync_result.get("matched", False)
+                    result["data"]["balance_payee_account"] = payee_sync_result.get("payee_account")
+                    result["data"]["balance_payee_bank_name"] = payee_sync_result.get("payee_bank_name")
                 except Exception as e:
                     logger.warning(f"自动生成结余明细失败: {e}")
                     result["data"]["balance_generated"] = False

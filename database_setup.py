@@ -330,6 +330,7 @@ TABLE_STATEMENTS = [
 		payee_id BIGINT COMMENT '收款人ID',
 		payee_name VARCHAR(64) COMMENT '收款人姓名',
 		payee_account VARCHAR(32) COMMENT '收款账号',
+		payee_bank_name VARCHAR(64) COMMENT '收款银行名称',
 		purchase_unit_price DECIMAL(14, 2) DEFAULT 0 COMMENT '采购单价',
 		payable_amount DECIMAL(14, 2) NOT NULL COMMENT '应付金额',
 		paid_amount DECIMAL(14, 2) DEFAULT 0 COMMENT '已支付金额',

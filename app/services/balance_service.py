@@ -29,12 +29,114 @@ class BalanceService:
 
     def __init__(self):
         self.ocr = None
+        self._balance_has_payee_bank_name = None
+        self._weighbill_has_warehouse_name = None
         if RAPIDOCR_AVAILABLE:
             try:
                 self.ocr = RapidOCR()
                 logger.info("支付回单OCR初始化成功")
             except Exception as e:
                 logger.error(f"支付回单OCR初始化失败: {e}")
+
+    def _has_balance_payee_bank_name_column(self) -> bool:
+        if self._balance_has_payee_bank_name is not None:
+            return self._balance_has_payee_bank_name
+
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SHOW COLUMNS FROM pd_balance_details LIKE 'payee_bank_name'")
+                    self._balance_has_payee_bank_name = cur.fetchone() is not None
+        except Exception as e:
+            logger.warning(f"检查 pd_balance_details.payee_bank_name 字段失败: {e}")
+            self._balance_has_payee_bank_name = False
+
+        return self._balance_has_payee_bank_name
+
+    def _has_weighbill_warehouse_name_column(self) -> bool:
+        if self._weighbill_has_warehouse_name is not None:
+            return self._weighbill_has_warehouse_name
+
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SHOW COLUMNS FROM pd_weighbills LIKE 'warehouse_name'")
+                    self._weighbill_has_warehouse_name = cur.fetchone() is not None
+        except Exception as e:
+            logger.warning(f"检查 pd_weighbills.warehouse_name 字段失败: {e}")
+            self._weighbill_has_warehouse_name = False
+
+        return self._weighbill_has_warehouse_name
+
+    @staticmethod
+    def _normalize_text(value: Optional[Any]) -> Optional[str]:
+        if value is None:
+            return None
+
+        raw = str(value).strip()
+        return raw or None
+
+    def _match_warehouse_payee(self, cur, warehouse_name: Optional[str], payee_name: Optional[str]) -> Optional[Dict[str, Any]]:
+        normalized_warehouse = self._normalize_text(warehouse_name)
+        normalized_payee = self._normalize_text(payee_name)
+        if not normalized_warehouse or not normalized_payee:
+            return None
+
+        cur.execute(
+            """
+            SELECT id, warehouse_name, payee_name, payee_account, payee_bank_name, is_active
+            FROM pd_warehouse_payees
+            WHERE warehouse_name = %s AND payee_name = %s
+            ORDER BY is_active DESC, id ASC
+            LIMIT 1
+            """,
+            (normalized_warehouse, normalized_payee)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        if isinstance(row, dict):
+            return dict(row)
+
+        columns = [desc[0] for desc in cur.description]
+        return dict(zip(columns, row))
+
+    def _resolve_balance_payee_fields(self, cur, warehouse_name: Optional[str], payee_name: Optional[str]) -> Dict[str, Any]:
+        normalized_warehouse = self._normalize_text(warehouse_name)
+        normalized_payee = self._normalize_text(payee_name)
+        matched_payee = self._match_warehouse_payee(cur, normalized_warehouse, normalized_payee)
+
+        return {
+            "warehouse_name": normalized_warehouse,
+            "payee_id": matched_payee.get("id") if matched_payee else None,
+            "payee_name": matched_payee.get("payee_name") if matched_payee else normalized_payee,
+            "payee_account": self._normalize_text(matched_payee.get("payee_account")) if matched_payee else None,
+            "payee_bank_name": self._normalize_text(matched_payee.get("payee_bank_name")) if matched_payee else None,
+            "matched": matched_payee is not None,
+        }
+
+    def _update_balance_payee_row(self, cur, balance_id: int, payee_fields: Dict[str, Any]) -> None:
+        update_fields = [
+            "payee_id = %s",
+            "payee_name = %s",
+            "payee_account = %s",
+        ]
+        params = [
+            payee_fields.get("payee_id"),
+            payee_fields.get("payee_name"),
+            payee_fields.get("payee_account"),
+        ]
+
+        if self._has_balance_payee_bank_name_column():
+            update_fields.append("payee_bank_name = %s")
+            params.append(payee_fields.get("payee_bank_name"))
+
+        params.append(balance_id)
+        cur.execute(
+            f"UPDATE pd_balance_details SET {', '.join(update_fields)}, updated_at = NOW() WHERE id = %s",
+            tuple(params)
+        )
 
     # ========== 状态常量 ==========
     OCR_STATUS_PENDING = 0  # 待确认
@@ -57,6 +159,8 @@ class BalanceService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    warehouse_select = "w.warehouse_name" if self._has_weighbill_warehouse_name_column() else "NULL"
+
                     # 构建查询条件
                     conditions = ["w.ocr_status IN ('已确认','已上传磅单')"]
                     params = []
@@ -86,6 +190,7 @@ class BalanceService:
                             w.product_name,
                             w.net_weight,
                             w.unit_price,
+                            COALESCE({warehouse_select}, d.warehouse) as warehouse_name,
                             d.driver_name,
                             d.driver_phone,
                             d.payee,
@@ -113,33 +218,57 @@ class BalanceService:
 
                         # 确定收款人姓名：优先payee，否则driver_name
                         receiver_name = data.get('payee') if data.get('payee') else data.get('driver_name')
+                        payee_fields = self._resolve_balance_payee_fields(
+                            cur,
+                            data.get('warehouse_name'),
+                            receiver_name,
+                        )
 
-                        # 插入结余明细（增加payee_id）
-                        cur.execute("""
-                            INSERT INTO pd_balance_details 
-                            (contract_no, delivery_id, weighbill_id, driver_name, driver_phone,
-                             vehicle_no, payee_id, payable_amount, paid_amount, balance_amount, payment_status,
-                             upload_status)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (
+                        insert_fields = [
+                            "contract_no", "delivery_id", "weighbill_id", "driver_name", "driver_phone",
+                            "vehicle_no", "payee_id", "payee_name", "payee_account", "purchase_unit_price",
+                            "payable_amount", "paid_amount", "balance_amount", "payment_status", "upload_status"
+                        ]
+                        insert_values = [
                             data.get('contract_no'),
                             data.get('delivery_id'),
                             data.get('weighbill_id'),
-                            receiver_name,  # 收款人姓名
+                            data.get('driver_name'),
                             data.get('driver_phone'),
                             data.get('vehicle_no'),
-                            data.get('uploader_id'),  # 收款人ID
-                            payable,  # 应付金额
-                            0,  # 已付金额
-                            payable,  # 结余金额
+                            payee_fields.get('payee_id'),
+                            payee_fields.get('payee_name'),
+                            payee_fields.get('payee_account'),
+                            unit_price,
+                            payable,
+                            0,
+                            payable,
                             self.PAY_STATUS_PENDING,
                             data.get('upload_status')
-                        ))
+                        ]
+
+                        if self._has_balance_payee_bank_name_column():
+                            insert_fields.insert(9, "payee_bank_name")
+                            insert_values.insert(9, payee_fields.get('payee_bank_name'))
+
+                        placeholders = ", ".join(["%s"] * len(insert_values))
+                        cur.execute(
+                            f"""
+                            INSERT INTO pd_balance_details 
+                            ({', '.join(insert_fields)})
+                            VALUES ({placeholders})
+                            """,
+                            tuple(insert_values)
+                        )
 
                         generated.append({
                             'balance_id': cur.lastrowid,
                             'weighbill_id': data.get('weighbill_id'),
-                            'driver_name': receiver_name,
+                            'driver_name': data.get('driver_name'),
+                            'payee_name': payee_fields.get('payee_name'),
+                            'payee_account': payee_fields.get('payee_account'),
+                            'payee_bank_name': payee_fields.get('payee_bank_name'),
+                            'matched_payee': payee_fields.get('matched', False),
                             'payable_amount': float(payable)
                         })
 
@@ -152,6 +281,56 @@ class BalanceService:
         except Exception as e:
             logger.error(f"生成结余明细失败: {e}")
             return {"success": False, "error": str(e)}
+
+    def sync_balance_payee_info(self, weighbill_id: int) -> Dict[str, Any]:
+        """根据磅单仓库和收款人姓名回写结余明细的收款账号与收款银行。"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    warehouse_select = "w.warehouse_name" if self._has_weighbill_warehouse_name_column() else "NULL"
+                    cur.execute(
+                        f"""
+                        SELECT b.id AS balance_id,
+                               COALESCE({warehouse_select}, d.warehouse) AS warehouse_name,
+                               COALESCE(d.payee, b.payee_name) AS payee_name
+                        FROM pd_balance_details b
+                        JOIN pd_weighbills w ON w.id = b.weighbill_id
+                        LEFT JOIN pd_deliveries d ON d.id = COALESCE(b.delivery_id, w.delivery_id)
+                        WHERE b.weighbill_id = %s
+                        LIMIT 1
+                        """,
+                        (weighbill_id,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return {"success": True, "updated": False, "matched": False, "message": "未找到对应结余明细"}
+
+                    if isinstance(row, dict):
+                        context = dict(row)
+                    else:
+                        columns = [desc[0] for desc in cur.description]
+                        context = dict(zip(columns, row))
+
+                    payee_fields = self._resolve_balance_payee_fields(
+                        cur,
+                        context.get("warehouse_name"),
+                        context.get("payee_name"),
+                    )
+                    self._update_balance_payee_row(cur, int(context["balance_id"]), payee_fields)
+
+                    return {
+                        "success": True,
+                        "updated": True,
+                        "matched": payee_fields.get("matched", False),
+                        "balance_id": int(context["balance_id"]),
+                        "warehouse_name": payee_fields.get("warehouse_name"),
+                        "payee_name": payee_fields.get("payee_name"),
+                        "payee_account": payee_fields.get("payee_account"),
+                        "payee_bank_name": payee_fields.get("payee_bank_name"),
+                    }
+        except Exception as e:
+            logger.error(f"同步结余收款信息失败: {e}")
+            return {"success": False, "updated": False, "matched": False, "error": str(e)}
 
     def recalculate_balance(self, balance_id: int) -> Dict[str, Any]:
         """重新计算结余金额和状态"""

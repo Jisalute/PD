@@ -75,6 +75,7 @@ class BalanceOut(BaseModel):
     driver_id_card: Optional[str] = None
     payee_name: Optional[str] = None
     payee_account: Optional[str] = None
+    payee_bank_name: Optional[str] = None
     vehicle_no: Optional[str] = None
     product_name: Optional[str] = None
     has_delivery_order: Optional[str] = None
@@ -280,126 +281,134 @@ async def list_balances_grouped(
 async def update_balance_payment(
         balance_id: int,
         paid_amount: float = Form(..., description="已打款金额"),
-    payment_detail_id: Optional[int] = Form(None, description="收款明细ID，未传结余ID时自动匹配"),
-    delivery_id: Optional[int] = Form(None, description="报单ID，未传结余ID时自动匹配"),
-    contract_no: Optional[str] = Form(None, description="合同编号，未传结余ID时自动匹配"),
-    vehicle_no: Optional[str] = Form(None, description="车号，未传结余ID时自动匹配"),
-    driver_phone: Optional[str] = Form(None, description="司机电话，未传结余ID时自动匹配"),
-        payee_name: Optional[str] = Form(None, description="收款人姓名"),
-        payee_account: Optional[str] = Form(None, description="收款人账号"),
-        payout_date: Optional[str] = Form(None, description="打款日期，格式：YYYY-MM-DD"),
+        payout_date: str = Form(..., description="打款日期，格式：YYYY-MM-DD"),
+        receipt_image: UploadFile = File(..., description="支付回单图片"),
         service: BalanceService = Depends(get_balance_service)
 ):
     """
-    编辑打款信息
-    输入Form格式
-
-    支持修改：
-    - 已打款金额（必填）
-    - 收款人姓名（可选）
-    - 收款人账号（可选）
-    - 打款日期（可选）
-
-    打款状态自动判断：
-    - 已打款金额 > 0 → 已打款 (payout_status=1)
-    - 已打款金额 = 0 → 待打款 (payout_status=0)
-
-    支付状态自动重新计算：
-    - 已打款金额 <= 0 → 待支付
-    - 已打款金额 >= 应付金额 → 已结清
-    - 0 < 已打款金额 < 应付金额 → 部分支付
+    编辑打款信息。
+    仅需上传已打款金额、打款日期和支付回单，收款人相关字段自动从结余明细匹配。
     """
     try:
-        resolved_balance_id = service.resolve_balance_id(
-            balance_id=balance_id,
-            payment_detail_id=payment_detail_id,
-            delivery_id=delivery_id,
-            contract_no=contract_no,
-            vehicle_no=vehicle_no,
-            driver_phone=driver_phone,
+        if receipt_image.content_type not in ["image/jpeg", "image/jpg", "image/png", "image/bmp"]:
+            raise HTTPException(status_code=400, detail="仅支持jpg/png/bmp格式的支付回单")
+
+        balance = service.get_balance_detail(balance_id)
+        if not balance:
+            raise HTTPException(status_code=404, detail="结余明细不存在")
+
+        payable_amount = Decimal(str(balance.get("payable_amount") or 0))
+        previous_paid_amount = Decimal(str(balance.get("paid_amount") or 0))
+        requested_paid_amount = Decimal(str(paid_amount))
+
+        if requested_paid_amount < 0:
+            raise HTTPException(status_code=400, detail="已打款金额不能小于0")
+        if requested_paid_amount < previous_paid_amount:
+            raise HTTPException(status_code=400, detail="已打款金额不能小于当前已打款金额")
+        if requested_paid_amount > payable_amount:
+            raise HTTPException(status_code=400, detail="已打款金额不能大于应打款金额")
+
+        settle_amount = requested_paid_amount - previous_paid_amount
+        if settle_amount <= 0:
+            raise HTTPException(status_code=400, detail="当前没有新增打款金额可用于上传支付回单")
+
+        payee_name = balance.get("payee_name")
+        payee_account = balance.get("payee_account")
+        payee_bank_name = balance.get("payee_bank_name")
+        if not payee_name:
+            raise HTTPException(status_code=400, detail="该结余明细未匹配到收款人，无法自动创建支付回单")
+
+        file_ext = Path(receipt_image.filename or "").suffix.lower() or ".jpg"
+        safe_payee = re.sub(r'[^\w\-]', '_', payee_name)
+        filename = f"receipt_{safe_payee}_{payout_date}_{os.urandom(4).hex()[:8]}{file_ext}"
+        file_path = UPLOAD_DIR / filename
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(receipt_image.file, buffer)
+
+        receipt_result = service.recognize_payment_receipt(str(file_path))
+        receipt_data = receipt_result.get("data", {}) if isinstance(receipt_result, dict) else {}
+        payment_receipt_data = {
+            "receipt_no": receipt_data.get("receipt_no"),
+            "payment_date": payout_date,
+            "payment_time": receipt_data.get("payment_time"),
+            "payer_name": receipt_data.get("payer_name"),
+            "payer_account": receipt_data.get("payer_account"),
+            "payee_name": payee_name,
+            "payee_account": payee_account,
+            "amount": float(settle_amount),
+            "fee": receipt_data.get("fee", 0) or 0,
+            "total_amount": receipt_data.get("total_amount") or float(settle_amount),
+            "bank_name": receipt_data.get("bank_name"),
+            "payee_bank_name": payee_bank_name,
+            "remark": receipt_data.get("remark"),
+            "raw_text": receipt_data.get("raw_text"),
+        }
+
+        created_receipt = service.create_payment_receipt(payment_receipt_data, str(file_path), is_manual=True)
+        if not created_receipt.get("success"):
+            if file_path.exists():
+                os.remove(file_path)
+            raise HTTPException(status_code=400, detail=created_receipt.get("error") or "支付回单保存失败")
+
+        receipt_id = created_receipt.get("data", {}).get("id")
+        verify_result = service.verify_payment(
+            receipt_id=receipt_id,
+            balance_items=[{"balance_id": balance_id, "amount": float(settle_amount)}]
         )
+        if not verify_result.get("success"):
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM pd_payment_receipts WHERE id = %s", (receipt_id,))
+            if file_path.exists():
+                os.remove(file_path)
+            raise HTTPException(status_code=400, detail=verify_result.get("error") or "支付回单核销失败")
 
-        result = service.recalculate_balance(resolved_balance_id)
-        if not result["success"]:
-            raise HTTPException(status_code=404, detail=result.get("error") or "结余明细不存在")
-
-        # 根据已打款金额自动判断打款状态
-        payout_status = 1 if paid_amount > 0 else 0
-
-        # 更新打款信息
+        payout_status = 1 if requested_paid_amount > 0 else 0
+        payment_status = 0
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # 构建动态更新字段
-                update_fields = ["paid_amount = %s", "payout_status = %s"]
-                params = [paid_amount, payout_status]
-
-                # 收款人姓名（如果提供）
-                if payee_name is not None:
-                    update_fields.append("payee_name = %s")
-                    params.append(payee_name)
-
-                # 收款人账号（如果提供）
-                if payee_account is not None:
-                    update_fields.append("payee_account = %s")
-                    params.append(payee_account)
-
-                # 打款日期（如果提供）
-                if payout_date is not None:
-                    update_fields.append("payout_date = %s")
-                    params.append(payout_date)
-
-                update_fields.append("updated_at = NOW()")
-                params.append(resolved_balance_id)
-
-                # 执行更新
-                sql = f"""
-                    UPDATE pd_balance_details 
-                    SET {', '.join(update_fields)}
+                cur.execute(
+                    """
+                    UPDATE pd_balance_details
+                    SET payout_status = %s,
+                        payout_date = %s,
+                        updated_at = NOW()
                     WHERE id = %s
-                """
-                cur.execute(sql, tuple(params))
+                    """,
+                    (payout_status, payout_date, balance_id)
+                )
 
-                # 重新计算结余金额和支付状态
-                cur.execute("""
-                    SELECT payable_amount, paid_amount 
-                    FROM pd_balance_details 
+                cur.execute(
+                    """
+                    SELECT payable_amount, paid_amount, payment_status
+                    FROM pd_balance_details
                     WHERE id = %s
-                """, (resolved_balance_id,))
+                    """,
+                    (balance_id,)
+                )
                 row = cur.fetchone()
                 if row:
-                    payable, paid = Decimal(str(row[0])), Decimal(str(row[1]))
-                    balance = payable - paid
-
-                    # 确定支付状态
-                    if paid <= 0:
-                        payment_status = 0  # 待支付
-                    elif paid >= payable:
-                        payment_status = 2  # 已结清
-                    else:
-                        payment_status = 1  # 部分支付
-
-                    cur.execute("""
-                        UPDATE pd_balance_details 
-                        SET balance_amount = %s, payment_status = %s 
-                        WHERE id = %s
-                    """, (balance, payment_status, resolved_balance_id))
+                    payment_status = row[2]
 
         return {
             "success": True,
             "message": "打款信息更新成功",
             "data": {
-                "id": resolved_balance_id,
-                "requested_id": balance_id,
-                "payment_detail_id": payment_detail_id,
-                "delivery_id": delivery_id,
+                "id": balance_id,
                 "paid_amount": paid_amount,
                 "payee_name": payee_name,
                 "payee_account": payee_account,
+                "payee_bank_name": payee_bank_name,
                 "payout_date": payout_date,
                 "payout_status": payout_status,
                 "payout_status_name": "已打款" if payout_status == 1 else "待打款",
                 "payment_status": payment_status,
-                "payment_status_name": {0: "待支付", 1: "部分支付", 2: "已结清"}.get(payment_status, "未知")
+                "payment_status_name": {0: "待支付", 1: "部分支付", 2: "已结清"}.get(payment_status, "未知"),
+                "receipt_id": receipt_id,
+                "receipt_image": str(file_path),
+                "settled_amount": float(settle_amount),
             }
         }
 
