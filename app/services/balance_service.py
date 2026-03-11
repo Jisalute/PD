@@ -162,7 +162,7 @@ class BalanceService:
                     warehouse_select = "w.warehouse_name" if self._has_weighbill_warehouse_name_column() else "NULL"
 
                     # 构建查询条件
-                    conditions = ["w.ocr_status IN ('已确认','已上传磅单')"]
+                    conditions = ["w.ocr_status IN ('已确认','已修正','已上传磅单')"]
                     params = []
 
                     if contract_no:
@@ -193,9 +193,7 @@ class BalanceService:
                             COALESCE({warehouse_select}, d.warehouse) as warehouse_name,
                             d.driver_name,
                             d.driver_phone,
-                            d.payee,
-                            d.uploader_id,
-                            d.upload_status
+                            d.payee
                         FROM pd_weighbills w
                         LEFT JOIN pd_deliveries d ON w.delivery_id = d.id
                         WHERE {where_sql}
@@ -227,7 +225,7 @@ class BalanceService:
                         insert_fields = [
                             "contract_no", "delivery_id", "weighbill_id", "driver_name", "driver_phone",
                             "vehicle_no", "payee_id", "payee_name", "payee_account", "purchase_unit_price",
-                            "payable_amount", "paid_amount", "balance_amount", "payment_status", "upload_status"
+                            "payable_amount", "paid_amount", "balance_amount", "payment_status"
                         ]
                         insert_values = [
                             data.get('contract_no'),
@@ -243,8 +241,7 @@ class BalanceService:
                             payable,
                             0,
                             payable,
-                            self.PAY_STATUS_PENDING,
-                            data.get('upload_status')
+                            self.PAY_STATUS_PENDING
                         ]
 
                         if self._has_balance_payee_bank_name_column():
@@ -272,9 +269,32 @@ class BalanceService:
                             'payable_amount': float(payable)
                         })
 
+                    if not generated:
+                        message = "没有符合条件的磅单可生成结余"
+                        if weighbill_id:
+                            cur.execute(
+                                """
+                                SELECT w.id,
+                                       w.ocr_status,
+                                       EXISTS(SELECT 1 FROM pd_balance_details b WHERE b.weighbill_id = w.id) AS has_balance
+                                FROM pd_weighbills w
+                                WHERE w.id = %s
+                                """,
+                                (weighbill_id,)
+                            )
+                            weighbill_row = cur.fetchone()
+                            if weighbill_row:
+                                weighbill_info = dict(weighbill_row) if isinstance(weighbill_row, dict) else dict(zip([desc[0] for desc in cur.description], weighbill_row))
+                                if weighbill_info.get("has_balance"):
+                                    message = f"磅单 {weighbill_id} 已生成过结余，无需重复生成"
+                                else:
+                                    message = f"磅单 {weighbill_id} 当前状态为 {weighbill_info.get('ocr_status')}，未满足自动结余条件"
+                            else:
+                                message = f"磅单 {weighbill_id} 不存在"
+
                     return {
                         "success": True,
-                        "message": f"成功生成 {len(generated)} 条结余明细",
+                        "message": f"成功生成 {len(generated)} 条结余明细" if generated else message,
                         "data": generated
                     }
 
