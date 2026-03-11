@@ -65,6 +65,50 @@ class ContractService:
         self.ocr = None
         self._init_ocr()
 
+    @staticmethod
+    def _to_date(value: Any) -> Optional[date]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, date):
+            return value
+        try:
+            return datetime.strptime(str(value), "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    @classmethod
+    def _is_contract_expired(
+        cls,
+        contract_date: Any,
+        end_date: Any,
+        grace_days: int = 5,
+        today: Optional[date] = None,
+    ) -> bool:
+        current_day = today or date.today()
+        end_day = cls._to_date(end_date)
+        if end_day is not None:
+            return end_day <= current_day
+
+        contract_day = cls._to_date(contract_date)
+        if contract_day is None:
+            return False
+
+        return contract_day + timedelta(days=grace_days) <= current_day
+
+    @classmethod
+    def _resolve_contract_status(
+        cls,
+        contract_date: Any,
+        end_date: Any,
+        current_status: Optional[str] = None,
+        grace_days: int = 5,
+    ) -> str:
+        if cls._is_contract_expired(contract_date, end_date, grace_days=grace_days):
+            return "已失效"
+        if current_status == "已失效":
+            return current_status
+        return current_status or "生效中"
+
     def _init_ocr(self):
         try:
             self.ocr = RapidOCR()
@@ -457,6 +501,11 @@ class ContractService:
                 data["truck_count"] = self._calculate_truck_count(data.get("total_quantity"))
             if data.get("contract_date"):
                 data["end_date"] = self._compute_end_date(data.get("contract_date"))
+            data["status"] = self._resolve_contract_status(
+                data.get("contract_date"),
+                data.get("end_date"),
+                data.get("status"),
+            )
             duplicate_id = self._find_duplicate_contract(data, products)
             if duplicate_id:
                 return {
@@ -522,13 +571,13 @@ class ContractService:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     # 获取原合同信息（包括图片路径和合同号）
-                    cur.execute("SELECT contract_no, contract_image_path FROM pd_contracts WHERE id = %s",
+                    cur.execute("SELECT contract_no, contract_image_path, contract_date, end_date, status FROM pd_contracts WHERE id = %s",
                                 (contract_id,))
                     old = cur.fetchone()
                     if not old:
                         return {"success": False, "error": f"合同ID {contract_id} 不存在"}
 
-                    old_contract_no, old_image_path = old
+                    old_contract_no, old_image_path, old_contract_date, old_end_date, old_status = old
 
                     # 如果要修改合同编号，检查新编号是否被占用
                     new_contract_no = data.get("contract_no")
@@ -560,6 +609,15 @@ class ContractService:
                     elif new_image_path:
                         # 传入了新图片路径，直接使用（路由层已处理文件保存和旧文件删除）
                         pass
+
+                    resolved_contract_date = data.get("contract_date", old_contract_date)
+                    resolved_end_date = data.get("end_date", old_end_date)
+                    resolved_status = data.get("status", old_status)
+                    data["status"] = self._resolve_contract_status(
+                        resolved_contract_date,
+                        resolved_end_date,
+                        resolved_status,
+                    )
 
                     # 构建更新SQL
                     update_fields = []
@@ -605,6 +663,7 @@ class ContractService:
     def get_contract_detail(self, contract_id: int) -> Optional[Dict]:
         """获取合同详情（含品种明细）"""
         try:
+            expire_contracts_after_grace()
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT * FROM pd_contracts WHERE id = %s", (contract_id,))
@@ -674,6 +733,7 @@ class ContractService:
     ) -> Dict[str, Any]:
         """获取合同列表（分页）"""
         try:
+            expire_contracts_after_grace()
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     where_clauses = []
