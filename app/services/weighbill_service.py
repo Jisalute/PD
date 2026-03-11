@@ -537,6 +537,25 @@ class WeighbillService:
         warehouse_name = str(warehouse_name).strip()
         return warehouse_name or None
 
+    def _upload_failure(
+            self,
+            error: str,
+            delivery_id: Optional[int],
+            product_name: Optional[str],
+            payload: Optional[Dict[str, Any]] = None,
+            current_user: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """记录上传失败原因，便于排查前端请求参数问题。"""
+        logger.warning(
+            "weighbill upload rejected delivery_id=%s product_name=%s user_id=%s payload_keys=%s error=%s",
+            delivery_id,
+            product_name,
+            current_user.get("id") if current_user else None,
+            sorted((payload or {}).keys()),
+            error,
+        )
+        return {"success": False, "error": error}
+
     def upload_weighbill(
             self,
             delivery_id: int,
@@ -552,11 +571,11 @@ class WeighbillService:
 
         try:
             if not delivery_id:
-                return {"success": False, "error": "报单ID不能为空"}
+                return self._upload_failure("报单ID不能为空", delivery_id, product_name, data, current_user)
 
             normalized_product = str(product_name).strip() if product_name is not None else ""
             if not normalized_product:
-                return {"success": False, "error": "品种名称不能为空"}
+                return self._upload_failure("品种名称不能为空", delivery_id, product_name, data, current_user)
 
             payload = dict(data or {})
             uploader_id = current_user.get("id") if current_user else None
@@ -569,7 +588,13 @@ class WeighbillService:
                 with conn.cursor() as cur:
                     cur.execute("SELECT id FROM pd_deliveries WHERE id = %s", (delivery_id,))
                     if not cur.fetchone():
-                        return {"success": False, "error": f"报单ID {delivery_id} 不存在"}
+                        return self._upload_failure(
+                            f"报单ID {delivery_id} 不存在",
+                            delivery_id,
+                            normalized_product,
+                            payload,
+                            current_user,
+                        )
 
                     cur.execute(
                         "SELECT * FROM pd_weighbills WHERE delivery_id = %s AND product_name = %s LIMIT 1",
@@ -609,7 +634,13 @@ class WeighbillService:
                     final_image_path = temp_file_path if temp_file_path else (existing.get("weighbill_image") if existing else None)
 
                     if final_net_weight in (None, ""):
-                        return {"success": False, "error": "净重不能为空"}
+                        return self._upload_failure(
+                            "净重不能为空",
+                            delivery_id,
+                            normalized_product,
+                            payload,
+                            current_user,
+                        )
 
                     net_weight_decimal = Decimal(str(final_net_weight)).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
                     gross_weight_decimal = None if final_gross_weight in (None, "") else Decimal(str(final_gross_weight)).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
@@ -762,7 +793,13 @@ class WeighbillService:
                     os.remove(temp_file_path)
                 except Exception:
                     pass
-            logger.error(f"上传/修改磅单失败: {e}")
+            logger.error(
+                "上传/修改磅单失败 delivery_id=%s product_name=%s user_id=%s: %s",
+                delivery_id,
+                product_name,
+                current_user.get("id") if current_user else None,
+                e,
+            )
             return {"success": False, "error": str(e)}
 
     def batch_upload_weighbills(

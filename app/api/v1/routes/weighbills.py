@@ -328,6 +328,15 @@ async def upload_weighbill(
             
             return result
         else:
+            logger.warning(
+                "upload_weighbill request rejected delivery_id=%s product_name=%s weigh_date=%s contract_no=%s vehicle_no=%s error=%s",
+                delivery_id,
+                product_name,
+                weigh_date,
+                contract_no,
+                vehicle_no,
+                result.get("error"),
+            )
             raise HTTPException(status_code=400, detail=result.get("error"))
 
     except HTTPException:
