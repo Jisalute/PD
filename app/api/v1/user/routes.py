@@ -869,10 +869,10 @@ def list_warehouses(
             where = ["1=1"]
             params = []
             if keyword:
-                where.append("warehouse_name LIKE %s")
+                where.append("w.warehouse_name LIKE %s")
                 params.append(f"%{keyword}%")
             if is_active is not None:
-                where.append("is_active = %s")
+                where.append("w.is_active = %s")
                 params.append(is_active)
             
             cur.execute(f"""
