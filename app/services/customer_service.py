@@ -23,7 +23,7 @@ class CustomerService:
                     
                     cur.execute(
                         """
-                        INSERT INTO pd_warehouse_payees
+                        INSERT INTO pd_payees
                         (warehouse_id, warehouse_name, payee_name, payee_account, payee_bank_name, is_active)
                         VALUES (%s, %s, %s, %s, %s, %s)
                         """,
@@ -52,7 +52,7 @@ class CustomerService:
         try:
             with get_conn() as conn:
                 with conn.cursor(DictCursor) as cur:
-                    cur.execute("SELECT id FROM pd_warehouse_payees WHERE id = %s", (payee_id,))
+                    cur.execute("SELECT id FROM pd_payees WHERE id = %s", (payee_id,))
                     if not cur.fetchone():
                         return {"success": False, "error": f"记录ID {payee_id} 不存在"}
 
@@ -120,7 +120,7 @@ class CustomerService:
 
                     # 查询总数
                     cur.execute(
-                        f"SELECT COUNT(*) as total FROM pd_warehouse_payees {where_clause}",
+                        f"SELECT COUNT(*) as total FROM pd_payees {where_clause}",
                         tuple(params),
                     )
                     result = cur.fetchone()
@@ -132,7 +132,7 @@ class CustomerService:
                         f"""
                         SELECT id, warehouse_id, warehouse_name, payee_name, payee_account, 
                                payee_bank_name, is_active, created_at, updated_at
-                        FROM pd_warehouse_payees
+                        FROM pd_payees
                         {where_clause}
                         ORDER BY id DESC
                         LIMIT %s OFFSET %s
