@@ -1525,51 +1525,124 @@ class DeliveryService:
 
     # ============ 新增：文本提取和合同匹配方法 ============
         
-    def extract_from_text(self, text: str) -> Dict[str, Optional[str]]:
-        """从非结构化文本中提取报单信息"""
-        result = {
-            'vehicle_no': None,
-            'driver_name': None,
-            'driver_id_card': None,
-            'driver_phone': None,
-            'product_name': None,
-            'has_delivery_order': '无',
-            'factory_name': None,
-            'raw_text': text,
-        }
-            
-        cleaned_text = text.replace('：', ':').strip()
-        found_delivery_order = False
-        delivery_order_value = '无'
+    def extract_from_text(self, text: str) -> Dict[str, Any]:
+        """
+        从非结构化文本中提取报货订单字段（高精度版）
+        支持复杂格式，优先提取第一个有效车辆信息
+        """
+        if not text or not isinstance(text, str):
+            return {}
+
+        # 预处理：统一符号、去除多余空格
+        normalized_lines = []
+        for line in text.split('\n'):
+            clean_line = re.sub(r'\s+', '', line.strip())
+            if clean_line:
+                # 统一冒号
+                clean_line = clean_line.replace('：', ':').replace('，', ',')
+                normalized_lines.append(clean_line)
         
-        for field_name, patterns in self.FIELD_PATTERNS.items():
-            for pattern_info in patterns:
-                if isinstance(pattern_info, tuple):
-                    pattern, default_value = pattern_info
-                else:
-                    pattern = pattern_info
-                    default_value = None
-                
-                match = re.search(pattern, cleaned_text, re.IGNORECASE)
-                if match:
-                    value = match.group(1) if match.groups() else match.group(0)
-                    value = value.strip()
-                    
-                    if field_name == 'has_delivery_order':
-                        found_delivery_order = True
-                        if default_value:
-                            delivery_order_value = default_value
-                        else:
-                            value_lower = value.lower()
-                            if any(kw in value_lower for kw in ['无', '没有', '否', 'false', '0', '不带']):
-                                delivery_order_value = '无'
-                            else:
-                                delivery_order_value = '有'
-                    else:
-                        result[field_name] = value
+        combined_text = ''.join(normalized_lines)
+
+        result = {}
+        
+        # === 1. 车牌号（主车）===
+        plate_match = re.search(
+            r'([京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼][A-Z][A-Z0-9]{4,6}[A-Z0-9挂学警港澳]?)',
+            combined_text
+        )
+        if plate_match:
+            plate = plate_match.group(1)
+            # 如果是挂车，尝试找主车（但本方法只取第一个车牌）
+            result['vehicle_no'] = plate
+
+        # === 2. 司机姓名 ===
+        name_match = re.search(r'(?:姓名|司机)[:：]?([一-龯]{2,4})', combined_text)
+        if name_match:
+            result['driver_name'] = name_match.group(1)
+
+        # === 3. 司机电话（增强版）===
+        # 先提取所有数字，再判断是否为手机号
+        digits = re.sub(r'\D', '', combined_text)
+        if len(digits) >= 11:
+            # 找第一个11位手机号
+            for i in range(len(digits) - 10):
+                candidate = digits[i:i+11]
+                if candidate.startswith(('13', '14', '15', '16', '17', '18', '19')):
+                    result['driver_phone'] = candidate
                     break
+
+        # === 4. 身份证 ===
+        id_match = re.search(r'(?:身份证|身份证号)[:：]?(\d{17}[\dXx])', combined_text, re.IGNORECASE)
+        if id_match:
+            result['driver_id_card'] = id_match.group(1).upper()
+
+        # === 5. 目标工厂（只认金利/豫光）===
+        factory_match = re.search(r'(金利|豫光)', combined_text)
+        if factory_match:
+            result['target_factory_name'] = factory_match.group(1)
+
+        # === 6. 品种（使用 FIELD_PATTERNS + 映射）===
+        product_raw = None
+        for pattern in self.FIELD_PATTERNS['product_name']:
+            match = re.search(pattern, combined_text, re.IGNORECASE)
+            if match:
+                product_raw = match.group(1).strip() if match.groups() else match.group(0).strip()
+                break
         
-        result['has_delivery_order'] = delivery_order_value
+        if not product_raw:
+            # 尝试关键词匹配
+            keywords = ['电动', '新能源', '黑皮', '通信', '摩托车', '大白', '牵引', 'AGM', 'EFB', '电信', '小四斤', '管式']
+            for kw in keywords:
+                if kw in combined_text:
+                    product_raw = kw
+                    break
+
+        if product_raw:
+            # 应用品类映射
+            PRODUCT_MAPPING = {
+                "电动车": "电动",
+                "黑皮": ["黑皮", "EFB"],
+                "新能源": ["电轿", "AGM"],
+                "通信": "电信",
+                "摩托车": ["摩托车", "小四斤"],
+                "大白": "大白",
+                "牵引": "管式"
+            }
+            
+            variety = product_raw
+            if product_raw in PRODUCT_MAPPING:
+                mapping = PRODUCT_MAPPING[product_raw]
+                if isinstance(mapping, list):
+                    for std in mapping:
+                        if std in combined_text:
+                            variety = std
+                            break
+                    else:
+                        variety = mapping[0]
+                else:
+                    variety = mapping
+            result['product_name'] = variety
+
+        # === 7. 联单状态 ===
+        if '联单' in combined_text or '反向开票' in combined_text:
+            if any(kw in combined_text for kw in ['自带联单', '有联单', '已上传']):
+                result['has_delivery_order'] = '有'
+            elif any(kw in combined_text for kw in ['没联单', '无联单', '不带', '反向开票']):
+                result['has_delivery_order'] = '无'
+            elif any(kw in combined_text for kw in ['需要做联单', '要联单', '需联单']):
+                result['has_delivery_order'] = '需办'
+            else:
+                result['has_delivery_order'] = '无'
+        else:
+            result['has_delivery_order'] = '无'
+
+        # === 8. 默认值补充 ===
+        if 'target_factory_name' not in result:
+            result['target_factory_name'] = '金利'  # 默认工厂
+        if 'product_name' not in result:
+            result['product_name'] = '普通'
+
         return result
 
     def validate_extracted(self, data: Dict[str, Optional[str]]) -> Dict[str, any]:

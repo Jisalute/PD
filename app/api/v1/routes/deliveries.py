@@ -150,6 +150,34 @@ class TextExtractResponse(BaseModel):
     suggested_data: Optional[Dict[str, Any]] = Field(None, description="建议的报单数据")
 # ============ 路由 ============
 
+@router.post("/parse", summary="解析报单文本", response_model=TextExtractResponse)
+async def parse_delivery_text(
+    body: TextExtractRequest,
+    service: DeliveryService = Depends(get_delivery_service)
+):
+    """解析上传的非结构化报单文本，返回提取结果、验证与合同匹配信息"""
+    try:
+        result = service.extract_with_contract(body.text, report_date=body.report_date)
+
+        return TextExtractResponse(
+            success=result.get('success', True),
+            message=result.get('reason', '解析完成'),
+            extracted=result.get('extracted', {}),
+            validation=result.get('validation', {
+                'is_valid': False,
+                'missing_fields': [],
+                'data': {}
+            }),
+            contract_match=result.get('contract_match', {
+                'matched': False,
+                'match_type': 'none'
+            }),
+            ready_to_create=result.get('ready_to_create', False),
+            suggested_data=result.get('suggested_data')
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/", summary="新增报货订单", response_model=dict)
 async def create_delivery(
     report_date: str = Form(...),
