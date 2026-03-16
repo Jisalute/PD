@@ -1556,6 +1556,11 @@ class DeliveryService:
         if not text or not isinstance(text, str):
             return {}
 
+        # 将换行符、制表符等替换为空格，避免破坏 JSON
+        cleaned_text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+        # 合并多个空格为单个空格
+        cleaned_text = ' '.join(cleaned_text.split())
+
         # 调用通义千问API提取信息
         try:
             completion = self.client.chat.completions.create(
