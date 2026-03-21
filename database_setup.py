@@ -205,6 +205,8 @@ TABLE_STATEMENTS = [
 	CREATE TABLE IF NOT EXISTS pd_delivery_plans (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
 		plan_no VARCHAR(64) NOT NULL COMMENT '计划编号',
+		smelter_name VARCHAR(128) DEFAULT NULL COMMENT '冶炼厂',
+		plan_name VARCHAR(128) DEFAULT NULL COMMENT '计划名',
 		plan_start_date DATE NOT NULL COMMENT '计划开始日期',
 		planned_trucks INT NOT NULL DEFAULT 0 COMMENT '计划车数',
 		planned_tonnage DECIMAL(12, 3) NOT NULL DEFAULT 0.000 COMMENT '计划吨数',
@@ -215,8 +217,23 @@ TABLE_STATEMENTS = [
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
 		UNIQUE KEY uk_plan_no (plan_no),
 		INDEX idx_plan_start_date (plan_start_date),
-		INDEX idx_plan_status (plan_status)
+		INDEX idx_plan_status (plan_status),
+		INDEX idx_smelter_name (smelter_name)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='报货计划表';
+	""",
+	"""
+	CREATE TABLE IF NOT EXISTS pd_delivery_plan_products (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+		plan_id BIGINT NOT NULL COMMENT '报货计划ID（关联pd_delivery_plans.id）',
+		category_name VARCHAR(64) NOT NULL COMMENT '品类',
+		unit_price DECIMAL(12, 2) NOT NULL DEFAULT 0.00 COMMENT '单价（元）',
+		sort_order INT NOT NULL DEFAULT 0 COMMENT '排序',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+		UNIQUE KEY uk_plan_category (plan_id, category_name),
+		INDEX idx_plan_id (plan_id),
+		FOREIGN KEY (plan_id) REFERENCES pd_delivery_plans(id) ON DELETE CASCADE
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='报货计划品类与单价表';
 	""",
 	"""
 	CREATE TABLE IF NOT EXISTS pd_weighbills (
