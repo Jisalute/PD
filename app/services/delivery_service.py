@@ -886,7 +886,7 @@ class DeliveryService:
                         'product_name', 'quantity', 'planned_trucks', 'vehicle_no',
                         'driver_name', 'driver_phone', 'driver_id_card', 'has_delivery_order',
                         'delivery_order_image', 'upload_status', 'source_type', 'shipper',
-                        'payee', 'service_fee', 'contract_no', 'contract_unit_price',
+                        'payee', 'service_fee', 'contract_no', 'contract_id', 'contract_unit_price',
                         'total_amount', 'status', 'uploader_id', 'uploader_name',
                         'reporter_id', 'reporter_name', 'voucher_images',
                         # ===== 需求4：新增字段 =====
@@ -915,6 +915,7 @@ class DeliveryService:
                         data.get('payee'),
                         service_fee,
                         contract_no,
+                        contract_id,
                         unit_price,
                         total_amount,
                         data.get('status', '待确认'),
@@ -953,6 +954,22 @@ class DeliveryService:
                             uploader_id=uploader_id,
                             uploader_name=uploader_name
                         )
+
+            # 从合同品种表同步到 pd_delivery_contract_product_prices，供列表 contract_product_prices 使用
+            try:
+                sync_res = get_delivery_contract_price_service().sync_from_contract(delivery_id)
+                if not sync_res.get("success"):
+                    logger.info(
+                        "create_delivery: 合同品类单价未同步 delivery_id=%s reason=%s",
+                        delivery_id,
+                        sync_res.get("error"),
+                    )
+            except Exception as ex:
+                logger.warning(
+                    "create_delivery: 同步合同品类单价异常 delivery_id=%s %s",
+                    delivery_id,
+                    ex,
+                )
 
             # 构建返回数据
             operations = self._build_operations(has_order, data.get('upload_status'), data.get('delivery_order_image'))
@@ -1183,6 +1200,23 @@ class DeliveryService:
                                 os.remove(p)
                         except Exception as e:
                             logger.warning(f"删除旧图片失败: {e}")
+
+                    # 合同编号变更时重新同步品类单价表
+                    if "contract_no" in data:
+                        try:
+                            sr = get_delivery_contract_price_service().sync_from_contract(delivery_id)
+                            if not sr.get("success"):
+                                logger.info(
+                                    "update_delivery: 合同品类单价未同步 id=%s reason=%s",
+                                    delivery_id,
+                                    sr.get("error"),
+                                )
+                        except Exception as ex:
+                            logger.warning(
+                                "update_delivery: 同步合同品类单价异常 id=%s %s",
+                                delivery_id,
+                                ex,
+                            )
 
                     # 返回结果
                     operations = self._build_operations(has_order, new_upload_status, new_delivery_image)
