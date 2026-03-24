@@ -164,3 +164,6 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8007
 - 数据库连接：`core/database.py` 的 `get_conn()` 使用 `DictCursor`；部分模块仍从 `contract_service` 等引入另一套 `get_conn()`（默认游标），行为略有差异，后续可考虑统一。
 - 报货计划：`app/services/delivery_plan_service.py` 在首次访问时会对旧库尝试补全 `pd_delivery_plans` 上的操作人相关列（见 `_ensure_plan_audit_columns`）。
 - 请求日志中间件会注入当前用户上下文（见 `main.py` 中 `request_logger` 与 `get_user_identity_from_authorization`）。
+
+
+#1
