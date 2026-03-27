@@ -18,6 +18,55 @@ from core.database import get_conn
 
 logger = logging.getLogger(__name__)
 
+_DELIVERY_ORDER_PLAN_COLUMNS_ENSURED = False
+
+
+def _ensure_delivery_order_plan_columns() -> None:
+    """旧库补全报单订货计划关联字段。"""
+    global _DELIVERY_ORDER_PLAN_COLUMNS_ENSURED
+    if _DELIVERY_ORDER_PLAN_COLUMNS_ENSURED:
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pd_deliveries'
+                    """
+                )
+                existing = {row["COLUMN_NAME"] for row in (cur.fetchall() or [])}
+                if "order_plan_id" not in existing:
+                    cur.execute(
+                        """
+                        ALTER TABLE pd_deliveries
+                        ADD COLUMN order_plan_id BIGINT DEFAULT NULL
+                            COMMENT '关联订货计划ID（与报单人、合同报货计划对应）'
+                        """
+                    )
+                if "is_last_truck_for_order_plan" not in existing:
+                    cur.execute(
+                        """
+                        ALTER TABLE pd_deliveries
+                        ADD COLUMN is_last_truck_for_order_plan TINYINT DEFAULT 0
+                            COMMENT '是否订货计划最后一车'
+                        """
+                    )
+                cur.execute(
+                    "SHOW INDEX FROM pd_deliveries WHERE Key_name = %s",
+                    ("idx_order_plan_id",),
+                )
+                if not cur.fetchone():
+                    try:
+                        cur.execute(
+                            "CREATE INDEX idx_order_plan_id ON pd_deliveries(order_plan_id)"
+                        )
+                    except Exception as ie:
+                        logger.warning("create idx_order_plan_id skipped: %s", ie)
+            conn.commit()
+        _DELIVERY_ORDER_PLAN_COLUMNS_ENSURED = True
+    except Exception as e:
+        logger.warning("ensure_delivery_order_plan_columns skipped/failed: %s", e)
 
 
 # 使用绝对路径，避免工作目录变化导致的问题
@@ -197,6 +246,42 @@ class DeliveryService:
         self._weighbill_audit_columns_exists = exists
         return exists
 
+    def _weighbill_has_order_plan_last_column(self) -> bool:
+        """兼容旧库：pd_weighbills.is_last_truck_for_order_plan"""
+        cached = getattr(self, "_weighbill_order_plan_last_exists", None)
+        if cached is not None:
+            return cached
+        exists = False
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SHOW COLUMNS FROM pd_weighbills LIKE 'is_last_truck_for_order_plan'"
+                    )
+                    exists = cur.fetchone() is not None
+        except Exception as e:
+            logger.warning("检测 pd_weighbills.is_last_truck_for_order_plan 失败: %s", e)
+        self._weighbill_order_plan_last_exists = exists
+        return exists
+
+    def _ensure_weighbill_order_plan_last_column(self) -> None:
+        if self._weighbill_has_order_plan_last_column():
+            return
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        ALTER TABLE pd_weighbills
+                        ADD COLUMN is_last_truck_for_order_plan TINYINT DEFAULT 0
+                            COMMENT '是否为订货计划最后一车'
+                        """
+                    )
+                conn.commit()
+            self._weighbill_order_plan_last_exists = True
+        except Exception as e:
+            logger.warning("ensure_weighbill_order_plan_last_column skipped/failed: %s", e)
+
     def _get_upload_status(self, image_path: Optional[str]) -> str:
         if image_path and os.path.exists(image_path):
             return "联单已上传"
@@ -334,7 +419,7 @@ class DeliveryService:
                     # 步骤1：品种匹配（仅 unit_price>0 的有效品种）
                     # ===== 需求3：优先匹配最先到期的合同 =====
                     cur.execute("""
-                        SELECT c.contract_no, p.unit_price, c.total_quantity,
+                        SELECT c.id AS contract_id, c.contract_no, p.unit_price, c.total_quantity,
                                FLOOR(c.total_quantity / 35) as contract_trucks,
                                c.contract_date,
                                c.end_date
@@ -440,6 +525,7 @@ class DeliveryService:
                             return {
                                 'matched': True,
                                 'contract_no': contract_no,
+                                'contract_id': contract.get('contract_id'),
                                 'unit_price': float(unit_price) if unit_price else None,
                                 'is_last_delivery': is_last,
                                 'contract_total_trucks': contract_trucks,
@@ -522,6 +608,137 @@ class DeliveryService:
                 'skipped_contracts': []
             }
 
+    def _match_order_plan_for_delivery(
+        self,
+        contract_id: Optional[int],
+        reporter_id: Optional[int],
+        planned_trucks: int,
+    ) -> Dict[str, Any]:
+        """
+        合同关联报货计划 + 报单人(与订货计划 created_by 一致) 定位订货计划，按审核通过报单累计车数校验余量。
+        最后一车判定与合同侧一致：(已用 + 本单) >= 计划总车数。
+        """
+        if not contract_id or planned_trucks < 1:
+            return {
+                "matched": True,
+                "skipped": True,
+                "order_plan_id": None,
+                "is_last_truck_for_order_plan": False,
+                "reason": None,
+            }
+        if reporter_id is None:
+            return {
+                "matched": True,
+                "skipped": True,
+                "order_plan_id": None,
+                "is_last_truck_for_order_plan": False,
+                "reason": None,
+            }
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT delivery_plan_id FROM pd_contracts WHERE id = %s LIMIT 1
+                        """,
+                        (contract_id,),
+                    )
+                    crow = cur.fetchone()
+                    if not crow:
+                        return {
+                            "matched": False,
+                            "skipped": False,
+                            "order_plan_id": None,
+                            "is_last_truck_for_order_plan": False,
+                            "reason": "合同不存在，无法校验订货计划",
+                        }
+                    dpid = crow.get("delivery_plan_id")
+                    if dpid is None:
+                        return {
+                            "matched": True,
+                            "skipped": True,
+                            "order_plan_id": None,
+                            "is_last_truck_for_order_plan": False,
+                            "reason": None,
+                        }
+
+                    cur.execute(
+                        """
+                        SELECT id, truck_count, plan_no
+                        FROM pd_order_plans
+                        WHERE delivery_plan_id = %s
+                          AND created_by = %s
+                          AND audit_status = %s
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (dpid, reporter_id, "审核通过"),
+                    )
+                    orow = cur.fetchone()
+                    if not orow:
+                        return {
+                            "matched": False,
+                            "skipped": False,
+                            "order_plan_id": None,
+                            "is_last_truck_for_order_plan": False,
+                            "reason": (
+                                "未找到与报单人对应的、已审核通过且与合同同一报货计划的订货计划，"
+                                "请先录入并审核订货计划"
+                            ),
+                        }
+
+                    order_plan_id = int(orow["id"])
+                    plan_total = int(orow.get("truck_count") or 0)
+                    plan_no = (orow.get("plan_no") or "").strip()
+
+                    cur.execute(
+                        """
+                        SELECT COALESCE(SUM(planned_trucks), 0) AS used_trucks
+                        FROM pd_deliveries
+                        WHERE order_plan_id = %s AND status = '审核通过'
+                        """,
+                        (order_plan_id,),
+                    )
+                    urow = cur.fetchone()
+                    used_trucks = int((urow or {}).get("used_trucks") or 0)
+                    remaining = plan_total - used_trucks
+
+                    if planned_trucks > remaining:
+                        return {
+                            "matched": False,
+                            "skipped": False,
+                            "order_plan_id": None,
+                            "is_last_truck_for_order_plan": False,
+                            "reason": (
+                                f"订货计划[{plan_no}]车数不足：本单需{planned_trucks}车，"
+                                f"计划共{plan_total}车、已用{used_trucks}车，仅剩{remaining}车"
+                            ),
+                        }
+
+                    is_last = (used_trucks + planned_trucks) >= plan_total
+
+                    return {
+                        "matched": True,
+                        "skipped": False,
+                        "order_plan_id": order_plan_id,
+                        "is_last_truck_for_order_plan": is_last,
+                        "order_plan_no": plan_no,
+                        "order_plan_total_trucks": plan_total,
+                        "order_plan_used_trucks": used_trucks,
+                        "order_plan_remaining_trucks": remaining - planned_trucks,
+                        "this_delivery_trucks": planned_trucks,
+                        "reason": None,
+                    }
+        except Exception as e:
+            logger.error("订货计划匹配失败: %s", e)
+            return {
+                "matched": False,
+                "skipped": False,
+                "order_plan_id": None,
+                "is_last_truck_for_order_plan": False,
+                "reason": f"订货计划校验异常: {e}",
+            }
+
     def _get_contract_price_by_product(self, contract_no: str, product_name: str) -> Optional[float]:
         """
         根据合同编号和品种获取单价
@@ -557,7 +774,8 @@ class DeliveryService:
                            unit_price: float,
                            warehouse_name: Optional[str],
                            uploader_id: int,
-                           uploader_name: str) -> bool:
+                           uploader_name: str,
+                           is_last_for_order_plan: bool = False) -> bool:
         """
         为每个品种创建磅单占位记录
         """
@@ -577,6 +795,7 @@ class DeliveryService:
 
                         # 创建磅单，标记最后一车，默认审核状态为待审核
                         is_last_mark = 1 if is_last_for_contract else 0
+                        is_last_op_mark = 1 if is_last_for_order_plan else 0
                         insert_fields = [
                             "delivery_id", "contract_no", "vehicle_no", "product_name",
                             "is_last_truck_for_contract", "unit_price", "upload_status",
@@ -587,6 +806,10 @@ class DeliveryService:
                             is_last_mark, unit_price, '待上传', '待上传磅单',
                             uploader_id, uploader_name
                         ]
+                        if self._weighbill_has_order_plan_last_column():
+                            _ip = insert_fields.index("is_last_truck_for_contract") + 1
+                            insert_fields.insert(_ip, "is_last_truck_for_order_plan")
+                            insert_values.insert(_ip, is_last_op_mark)
 
                         if self._weighbill_has_warehouse_name_column():
                             insert_fields.insert(4, "warehouse_name")
@@ -882,6 +1105,30 @@ class DeliveryService:
             data['contract_unit_price'] = unit_price
             data['total_amount'] = total_amount
 
+            _ensure_delivery_order_plan_columns()
+            op_match = self._match_order_plan_for_delivery(
+                contract_id, reporter_id, planned_trucks
+            )
+            if not op_match["matched"]:
+                return {
+                    "success": False,
+                    "error": op_match["reason"],
+                    "suggest": "请确认订货计划已审核、报单人与订货计划录入人一致，或调整车数/订货计划",
+                }
+            order_plan_id = op_match.get("order_plan_id")
+            is_last_truck_for_order_plan = bool(op_match.get("is_last_truck_for_order_plan"))
+            order_plan_flag_int = 1 if is_last_truck_for_order_plan else 0
+            order_plan_truck_info = None
+            if not op_match.get("skipped"):
+                order_plan_truck_info = {
+                    "order_plan_id": order_plan_id,
+                    "order_plan_no": op_match.get("order_plan_no"),
+                    "order_plan_total_trucks": op_match.get("order_plan_total_trucks"),
+                    "order_plan_used_trucks": op_match.get("order_plan_used_trucks"),
+                    "order_plan_remaining_trucks": op_match.get("order_plan_remaining_trucks"),
+                    "this_delivery_trucks": op_match.get("this_delivery_trucks"),
+                }
+
             # ---------- 插入数据库 ----------
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -892,7 +1139,9 @@ class DeliveryService:
                         'product_name', 'quantity', 'planned_trucks', 'vehicle_no',
                         'driver_name', 'driver_phone', 'driver_id_card', 'has_delivery_order',
                         'delivery_order_image', 'upload_status', 'source_type', 'shipper',
-                        'payee', 'service_fee', 'contract_no', 'contract_id', 'contract_unit_price',
+                        'payee', 'service_fee', 'contract_no', 'contract_id',
+                        'order_plan_id', 'is_last_truck_for_order_plan',
+                        'contract_unit_price',
                         'total_amount', 'status', 'uploader_id', 'uploader_name',
                         'reporter_id', 'reporter_name', 'voucher_images',
                         # ===== 需求4：新增字段 =====
@@ -922,6 +1171,8 @@ class DeliveryService:
                         service_fee,
                         contract_no,
                         contract_id,
+                        order_plan_id,
+                        order_plan_flag_int,
                         unit_price,
                         total_amount,
                         data.get('status', '审核未通过'),
@@ -949,6 +1200,7 @@ class DeliveryService:
 
                     # 创建磅单记录（原有逻辑）
                     if products and contract_no:
+                        self._ensure_weighbill_order_plan_last_column()
                         self._create_weighbills(
                             delivery_id=delivery_id,
                             contract_no=contract_no,
@@ -958,7 +1210,8 @@ class DeliveryService:
                             unit_price=unit_price,
                             warehouse_name=data.get('warehouse'),
                             uploader_id=uploader_id,
-                            uploader_name=uploader_name
+                            uploader_name=uploader_name,
+                            is_last_for_order_plan=is_last_truck_for_order_plan,
                         )
 
             # 从合同品种表同步到 pd_delivery_contract_product_prices，供列表 contract_product_prices 使用
@@ -980,9 +1233,14 @@ class DeliveryService:
             # 构建返回数据
             operations = self._build_operations(has_order, data.get('upload_status'), data.get('delivery_order_image'))
 
+            msg_suffix = ""
+            if is_last_delivery:
+                msg_suffix += "（合同最后一单）"
+            if is_last_truck_for_order_plan:
+                msg_suffix += "（订货计划最后一车）"
             response_data = {
                 "success": True,
-                "message": "报货订单创建成功" + ("（合同最后一单）" if is_last_delivery else ""),
+                "message": "报货订单创建成功" + msg_suffix,
                 "warnings": warnings if warnings else [],
                 "data": {
                     "id": delivery_id,
@@ -1000,6 +1258,8 @@ class DeliveryService:
                     "reporter_id": reporter_id,
                     "reporter_name": reporter_name,
                     "is_last_delivery": is_last_delivery,
+                    "order_plan_id": order_plan_id,
+                    "is_last_truck_for_order_plan": is_last_truck_for_order_plan,
                     "voucher_images": data.get('voucher_images'),  # 新增字段
                     "contract_truck_info": {
                         "contract_total_trucks": match_result['contract_total_trucks'],
@@ -1007,6 +1267,7 @@ class DeliveryService:
                         "contract_remaining_trucks": match_result['contract_remaining_trucks'],
                         "this_delivery_trucks": match_result['this_delivery_trucks']
                     },
+                    "order_plan_truck_info": order_plan_truck_info,
                     "operations": operations
                 }
             }

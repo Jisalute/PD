@@ -84,6 +84,64 @@ class OrderPlanService:
         )
         return cur.fetchone()
 
+    def _validate_truck_limit(
+        self,
+        cur,
+        delivery_plan_id: int,
+        candidate_truck_count: int,
+        *,
+        include_candidate: bool,
+        exclude_order_plan_id: Optional[int] = None,
+    ) -> Optional[str]:
+        """
+        校验同一报货计划下「待审核 + 审核通过」订货计划总车数不超过报货计划 planned_trucks。
+        """
+        cur.execute(
+            "SELECT planned_trucks FROM pd_delivery_plans WHERE id = %s LIMIT 1",
+            (delivery_plan_id,),
+        )
+        dp = cur.fetchone()
+        if not dp:
+            return f"报货计划 ID {delivery_plan_id} 不存在"
+
+        planned_limit = int(dp.get("planned_trucks") or 0)
+        if exclude_order_plan_id is None:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(truck_count), 0) AS used_trucks
+                FROM pd_order_plans
+                WHERE delivery_plan_id = %s
+                  AND audit_status IN (%s, %s)
+                """,
+                (delivery_plan_id, AUDIT_STATUS_PENDING, AUDIT_STATUS_APPROVED),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(truck_count), 0) AS used_trucks
+                FROM pd_order_plans
+                WHERE delivery_plan_id = %s
+                  AND id <> %s
+                  AND audit_status IN (%s, %s)
+                """,
+                (
+                    delivery_plan_id,
+                    exclude_order_plan_id,
+                    AUDIT_STATUS_PENDING,
+                    AUDIT_STATUS_APPROVED,
+                ),
+            )
+        used_row = cur.fetchone() or {}
+        used_trucks = int(used_row.get("used_trucks") or 0)
+        projected = used_trucks + (candidate_truck_count if include_candidate else 0)
+        if projected > planned_limit:
+            return (
+                f"报货计划总车数超出报货计划上限：计划车数{planned_limit}车，"
+                f"当前待审核/审核通过合计{used_trucks}车，"
+                f"本次提交{candidate_truck_count}车，提交后将达{projected}车"
+            )
+        return None
+
     def create(
         self,
         plan_no: str,
@@ -111,6 +169,14 @@ class OrderPlanService:
                     delivery_plan_id = int(dp["id"])
                     plan_no_db = (dp.get("plan_no") or plan_no).strip()
                     smelter = dp.get("smelter_name")
+                    limit_err = self._validate_truck_limit(
+                        cur,
+                        delivery_plan_id,
+                        truck_count,
+                        include_candidate=True,
+                    )
+                    if limit_err:
+                        return {"success": False, "error": limit_err}
 
                     cur.execute(
                         """
@@ -261,8 +327,13 @@ class OrderPlanService:
         *,
         operator_id: Optional[int] = None,
         operator_name: Optional[str] = None,
-        is_accounting_role: bool = False,
+        keep_audit_status: bool = False,
     ) -> Dict[str, Any]:
+        """
+        仅当订货计划当前为「审核通过」或「审核未通过」时可改车数（待审核不可改）。
+        keep_audit_status=True（审核主管/会计）：只更新车数与操作人，状态不变。
+        keep_audit_status=False：车数更新后状态改为「待审核」，需重新审核。
+        """
         if truck_count < 0:
             return {"success": False, "error": "车数不能为负"}
 
@@ -271,7 +342,7 @@ class OrderPlanService:
             with get_conn() as conn:
                 with conn.cursor(DictCursor) as cur:
                     cur.execute(
-                        "SELECT id, audit_status FROM pd_order_plans WHERE id = %s",
+                        "SELECT id, audit_status, delivery_plan_id FROM pd_order_plans WHERE id = %s",
                         (order_plan_id,),
                     )
                     row = cur.fetchone()
@@ -281,7 +352,38 @@ class OrderPlanService:
                             "error": f"订货计划 ID {order_plan_id} 不存在",
                         }
 
-                    if is_accounting_role:
+                    current_status = row.get("audit_status")
+                    if current_status not in (
+                        AUDIT_STATUS_APPROVED,
+                        AUDIT_STATUS_REJECTED,
+                    ):
+                        return {
+                            "success": False,
+                            "error": "仅「审核通过」或「审核未通过」状态的订货计划可修改车数",
+                        }
+
+                    # 审核主管/会计：保持当前审核结论；其他角色：改后退回待审核
+                    if keep_audit_status:
+                        new_status = current_status
+                    else:
+                        new_status = AUDIT_STATUS_PENDING
+                    # 仅「待审核/审核通过」计入报货计划车数上限；保持「审核未通过」时不计入
+                    include_candidate = new_status in (
+                        AUDIT_STATUS_PENDING,
+                        AUDIT_STATUS_APPROVED,
+                    )
+                    delivery_plan_id = int(row.get("delivery_plan_id"))
+                    limit_err = self._validate_truck_limit(
+                        cur,
+                        delivery_plan_id,
+                        truck_count,
+                        include_candidate=include_candidate,
+                        exclude_order_plan_id=order_plan_id,
+                    )
+                    if limit_err:
+                        return {"success": False, "error": limit_err}
+
+                    if keep_audit_status:
                         cur.execute(
                             """
                             UPDATE pd_order_plans
@@ -289,8 +391,15 @@ class OrderPlanService:
                                 updated_by = %s,
                                 updated_by_name = %s
                             WHERE id = %s
+                              AND audit_status = %s
                             """,
-                            (truck_count, operator_id, operator_name, order_plan_id),
+                            (
+                                truck_count,
+                                operator_id,
+                                operator_name,
+                                order_plan_id,
+                                current_status,
+                            ),
                         )
                     else:
                         cur.execute(
@@ -301,6 +410,7 @@ class OrderPlanService:
                                 updated_by = %s,
                                 updated_by_name = %s
                             WHERE id = %s
+                              AND audit_status = %s
                             """,
                             (
                                 truck_count,
@@ -308,8 +418,15 @@ class OrderPlanService:
                                 operator_id,
                                 operator_name,
                                 order_plan_id,
+                                current_status,
                             ),
                         )
+                    if cur.rowcount == 0:
+                        conn.rollback()
+                        return {
+                            "success": False,
+                            "error": "仅「审核通过」或「审核未通过」可修改车数，或数据已被他人更新，请刷新后重试",
+                        }
                     conn.commit()
 
                     cur.execute(

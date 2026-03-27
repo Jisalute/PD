@@ -82,6 +82,8 @@ class DeliveryOut(BaseModel):
     payee: Optional[str] = None
     service_fee: Optional[float] = None  # 联单费
     contract_no: Optional[str] = None
+    order_plan_id: Optional[int] = None
+    is_last_truck_for_order_plan: Optional[bool] = None
     contract_unit_price: Optional[float] = None
     total_amount: Optional[float] = None
     status: Optional[str] = None
