@@ -206,6 +206,32 @@ class DeliveryPlanService:
                 plan_id: Optional[int] = None
                 try:
                     with conn.cursor(DictCursor) as cur:
+                        # 业务约束：一个用户只能存在一条订货计划记录
+                        if operator_id is not None:
+                            cur.execute(
+                                "SELECT id, plan_no FROM pd_delivery_plans WHERE created_by = %s LIMIT 1",
+                                (operator_id,),
+                            )
+                        elif operator_name:
+                            cur.execute(
+                                "SELECT id, plan_no FROM pd_delivery_plans WHERE created_by_name = %s LIMIT 1",
+                                (operator_name,),
+                            )
+                        else:
+                            cur.execute(
+                                "SELECT id, plan_no FROM pd_delivery_plans WHERE created_by IS NULL AND created_by_name IS NULL LIMIT 1"
+                            )
+                        existed = cur.fetchone()
+                        if existed:
+                            existed_plan_no = existed.get("plan_no") if isinstance(existed, dict) else None
+                            conn.rollback()
+                            if existed_plan_no:
+                                return {
+                                    "success": False,
+                                    "error": f"当前用户已存在订货计划（计划编号：{existed_plan_no}），不能录入第二条",
+                                }
+                            return {"success": False, "error": "当前用户已存在订货计划，不能录入第二条"}
+
                         cur.execute(
                             """
                             INSERT INTO pd_delivery_plans (
