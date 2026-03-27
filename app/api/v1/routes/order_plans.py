@@ -1,5 +1,5 @@
 """
-订货计划：录入、列表筛选、仅修改车数（非审核主管改车数后状态回退为待审核）、审核
+订货计划：录入、列表筛选、修改车数（仅审核通过/审核未通过可改；审核主管/会计不改状态）、审核
 """
 from typing import Literal, Optional
 
@@ -10,6 +10,9 @@ from app.services.order_plan_service import get_order_plan_service, OrderPlanSer
 from core.auth import get_current_user
 
 router = APIRouter(prefix="/order-plans", tags=["订货计划"])
+
+# 修改车数后仍保持原审核结论（通过或未通过）的角色；其他角色改车数后退回「待审核」
+_ORDER_PLAN_TRUCK_EDIT_KEEP_STATUS_ROLES = frozenset({"审核主管", "会计"})
 
 
 def _operator_from_user(current_user: dict) -> tuple[Optional[int], Optional[str]]:
@@ -158,7 +161,7 @@ async def get_order_plan(
 
 @router.patch(
     "/{order_plan_id}/truck-count",
-    summary="仅修改车数（非审核主管角色修改后审核状态变为待审核；审核主管不改状态）",
+    summary="仅修改车数（仅审核通过/审核未通过可改；审核主管/会计保持原结论，其他角色改为待审核）",
     response_model=dict,
 )
 async def patch_order_plan_truck_count(
@@ -169,13 +172,13 @@ async def patch_order_plan_truck_count(
 ):
     op_id, op_name = _operator_from_user(current_user)
     role = (current_user.get("role") or "").strip()
-    is_accounting = role == "会计"
+    keep_audit_status = role in _ORDER_PLAN_TRUCK_EDIT_KEEP_STATUS_ROLES
     result = service.update_truck_count_only(
         order_plan_id,
         body.truck_count,
         operator_id=op_id,
         operator_name=op_name,
-        is_accounting_role=is_accounting,
+        keep_audit_status=keep_audit_status,
     )
     if result.get("success"):
         return result
