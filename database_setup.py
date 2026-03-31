@@ -700,26 +700,48 @@ def ensure_pd_user_permissions_columns():
 	connection = pymysql.connect(**config)
 	try:
 		with connection.cursor() as cursor:
-			cursor.execute("SHOW COLUMNS FROM pd_user_permissions LIKE 'perm_warehouse_manage'")
-			if cursor.fetchone() is None:
-				cursor.execute("""
-					ALTER TABLE pd_user_permissions
-					ADD COLUMN perm_warehouse_manage TINYINT DEFAULT 0 COMMENT '库房管理权限'
-					AFTER perm_weighbill_manage
-				""")
-				print("pd_user_permissions 已添加 perm_warehouse_manage 列")
-			cursor.execute("SHOW COLUMNS FROM pd_user_permissions LIKE 'perm_payee_manage'")
-			if cursor.fetchone() is None:
-				cursor.execute("SHOW COLUMNS FROM pd_user_permissions LIKE 'perm_warehouse_manage'")
-				after = "perm_warehouse_manage" if cursor.fetchone() else "perm_weighbill_manage"
+			permission_columns = [
+				("perm_permission_manage", "权限管理权限"),
+				("perm_jinli_payment", "金利回款管理权限"),
+				("perm_yuguang_payment", "豫光回款管理权限"),
+				("perm_schedule", "排期管理权限"),
+				("perm_payout", "打款管理权限"),
+				("perm_payout_stats", "打款统计权限"),
+				("perm_report_stats", "统计与报表权限"),
+				("perm_contract_progress", "合同发运进度权限"),
+				("perm_contract_manage", "销售合同管理权限"),
+				("perm_customer_manage", "客户管理权限"),
+				("perm_delivery_manage", "报货管理权限"),
+				("perm_weighbill_manage", "磅单管理权限"),
+				("perm_warehouse_manage", "库房管理权限"),
+				("perm_payee_manage", "收款人管理权限"),
+				("perm_account_manage", "账号管理权限"),
+				("perm_role_manage", "角色管理权限"),
+				("perm_ai_detect", "AI检测权限"),
+				("perm_ai_predict", "AI预测权限"),
+			]
+
+			for idx, (column_name, comment) in enumerate(permission_columns):
+				cursor.execute("SHOW COLUMNS FROM pd_user_permissions LIKE %s", (column_name,))
+				if cursor.fetchone() is not None:
+					continue
+
+				after_column = "role"
+				for prev_column, _ in reversed(permission_columns[:idx]):
+					cursor.execute("SHOW COLUMNS FROM pd_user_permissions LIKE %s", (prev_column,))
+					if cursor.fetchone() is not None:
+						after_column = prev_column
+						break
+
 				cursor.execute(
 					f"""
 					ALTER TABLE pd_user_permissions
-					ADD COLUMN perm_payee_manage TINYINT DEFAULT 0 COMMENT '收款人管理权限'
-					AFTER {after}
-					"""
+					ADD COLUMN {column_name} TINYINT DEFAULT 0 COMMENT %s
+					AFTER {after_column}
+					""",
+					(comment,),
 				)
-				print("pd_user_permissions 已添加 perm_payee_manage 列")
+				print(f"pd_user_permissions 已添加 {column_name} 列")
 		connection.commit()
 	finally:
 		connection.close()
