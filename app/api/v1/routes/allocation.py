@@ -11,13 +11,13 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.allocation_service import (
+    compute_manager_daily_allocation,
     get_active_contracts,
     get_warehouses,
     get_warehouse_daily_capacity,
     solve_dispatch_plan,
     save_predictions_to_db,
-    get_predictions,
-    get_filter_options
+    get_filter_options,
 )
 from app.services.contract_service import get_conn
 
@@ -61,6 +61,14 @@ class ContractsStatusResponse(BaseModel):
 
     success: bool = Field(True, description="是否成功")
     contracts: list[ContractStatusResponse] = Field(..., description="合同状态列表")
+
+
+class ManagerDailyDemandResponse(BaseModel):
+    """大区经理每日分配需求（当日及未来）"""
+    success: bool = True
+    tonnage_per_truck: int = 35
+    days: list
+    meta: dict
 
 
 class SetupTestDataRequest(BaseModel):
@@ -341,31 +349,41 @@ async def setup_test_data(request: SetupTestDataRequest = Body(...)):
     """
     设置测试数据
 
-def run_test_prediction(num_contracts: int = 5, H: int = 10):
-    """
-    测试预测函数（后端定时任务）
+    功能:
+    - 创建指定数量的测试合同
+    - 为每个合同创建报单
+    - 为每个合同创建磅单
+    - 自动设置仓库
 
-    生成测试数据并运行预测，保存结果到数据库
+    用于在没有真实数据时测试分配规划功能
     """
     try:
-        prefix = "TESTPLAN"
-        _cleanup_test_data(prefix=prefix)
         _setup_warehouses()
-        _insert_test_contracts(num_contracts=num_contracts, prefix=prefix)
 
-        window_start = datetime.now().strftime("%Y-%m-%d")
-        contracts = get_active_contracts(as_of_date=window_start)
-        warehouses = get_warehouses()
-        daily_cap = get_warehouse_daily_capacity()
-        window_end = (datetime.now() + timedelta(days=H - 1)).strftime("%Y-%m-%d")
+        contracts = _insert_test_contracts(
+            num_contracts=request.num_contracts,
+            prefix=request.contract_prefix,
+        )
 
-        plan, status = solve_dispatch_plan(
+        deliveries_count = _insert_test_deliveries(
             contracts=contracts,
-            warehouses=warehouses,
-            daily_cap=daily_cap,
-            window_start=window_start,
-            window_end=window_end,
-            solver_msg=False
+            max_per_contract=request.num_deliveries_per_contract,
+        )
+
+        weighbills_count = _insert_test_weighbills(
+            contracts=contracts,
+            max_per_contract=request.num_weighbills_per_contract,
+        )
+
+        return SetupTestDataResponse(
+            success=True,
+            message=(
+                f"测试数据设置成功: {len(contracts)}个合同, "
+                f"{deliveries_count}个报单, {weighbills_count}个磅单"
+            ),
+            inserted_contracts=len(contracts),
+            inserted_deliveries=deliveries_count,
+            inserted_weighbills=weighbills_count,
         )
 
     except Exception as e:
@@ -405,7 +423,7 @@ async def cleanup_test_data(
         )
 
     except Exception as e:
-        print(f"测试预测异常: {e}")
+        raise HTTPException(status_code=500, detail=f"清理测试数据失败: {str(e)}")
 
 
 @router.get(
@@ -416,11 +434,15 @@ async def cleanup_test_data(
 )
 async def get_contracts_status():
     """
-    每日预测函数（后端定时任务）
+    获取所有生效中合同的状态(含已发车数)
 
-    读取真实合同数据并运行预测，保存结果到数据库
+    返回每个合同的:
+    - 原始需求车数
+    - 已发车数
+    - 剩余车数
     """
     try:
+        contracts_status = []
         with _get_db_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -517,12 +539,18 @@ async def generate_allocation_plan(
         contracts = get_active_contracts(as_of_date=as_of_date)
 
         if not contracts:
-            print("无生效中的合同，跳过预测")
-            return
+            raise HTTPException(status_code=400, detail="无生效中的合同")
 
         warehouses = get_warehouses()
+
+        if not warehouses:
+            raise HTTPException(status_code=400, detail="无可用仓库")
+
         daily_cap = get_warehouse_daily_capacity()
-        window_end = (datetime.now() + timedelta(days=H - 1)).strftime("%Y-%m-%d")
+
+        window_end = (
+            datetime.strptime(window_start, "%Y-%m-%d") + timedelta(days=H - 1)
+        ).strftime("%Y-%m-%d")
 
         plan, status = solve_dispatch_plan(
             contracts=contracts,
@@ -530,17 +558,43 @@ async def generate_allocation_plan(
             daily_cap=daily_cap,
             window_start=window_start,
             window_end=window_end,
-            solver_msg=False
+            solver_msg=include_solver_log,
         )
 
-        if status in ("Optimal", "Feasible"):
-            _save_predictions_to_db(plan, window_start, is_test=False)
-            print(f"每日预测完成: {window_start}, 状态: {status}")
-        else:
-            print(f"每日预测失败: {status}")
+        meta = {
+            "solver_status": status,
+            "window_start": window_start,
+            "window_end": window_end,
+            "H": H,
+            "tons_per_truck": 35,
+            "contracts_count": len(contracts),
+            "smelters": sorted({c.smelter for c in contracts}),
+            "total_trucks_needed": sum(c.total_trucks for c in contracts),
+            "total_trucks_planned": sum(
+                cnt
+                for contract_map in plan.values()
+                for smelter_map in contract_map.values()
+                for date_map in smelter_map.values()
+                for cnt in date_map.values()
+            ),
+        }
 
+        if status not in ("Optimal", "Feasible"):
+            raise HTTPException(status_code=500, detail=f"规划求解失败: {status}")
+
+        _save_predictions_to_db(plan, window_start, is_test=False)
+
+        return AllocationPlanResponse(
+            success=True,
+            message="调度计划生成成功",
+            plan=plan,
+            meta=meta,
+        )
+
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"每日预测异常: {e}")
+        raise HTTPException(status_code=500, detail=f"生成调度计划失败: {str(e)}")
 
 
 @router.get(
@@ -576,7 +630,38 @@ async def get_warehouse_capacity():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仓库产能失败: {str(e)}")
 
-        predictions, prediction_date, total_trucks = get_predictions(manager_list, smelter_list, contract_list)
+
+@router.get(
+    "/manager-daily-demand",
+    response_model=ManagerDailyDemandResponse,
+    summary="分配需求：大区经理每日运货量",
+)
+async def get_manager_daily_demand():
+    """
+    依据生效中合同在该报货计划上的生效期限（多份合同取最早起始、最晚截止；
+    无截止日期时按签订日起 4 天），叠加报货计划 `plan_start_date`，
+    将订货计划（待审核/审核通过）剩余车数在有效日内均分，按大区经理汇总每日吨数与车数。
+
+    仅返回**当日及未来**的日期；已无剩余车数的订货计划不参与。
+    """
+    try:
+        result = compute_manager_daily_allocation()
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("error") or "计算分配需求失败",
+            )
+        return ManagerDailyDemandResponse(
+            success=True,
+            tonnage_per_truck=int(result.get("tonnage_per_truck") or 35),
+            days=result.get("days") or [],
+            meta=result.get("meta") or {},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"分配需求计算失败: {str(e)}")
+
 
 @router.get(
     "/contracts",
@@ -605,7 +690,7 @@ async def get_active_contracts_list():
             count=len(contracts),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询预测结果失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取合同列表失败: {str(e)}")
 
 
 @router.post(

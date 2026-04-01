@@ -29,8 +29,9 @@ dispatch_planner.py
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 try:
     import pulp
 except ImportError as e:
@@ -535,5 +536,240 @@ def solve_dispatch_plan(
         plan.setdefault(w, {}).setdefault(cno, {}).setdefault(smelter, {})[d] = val
 
     return plan, status
+
+
+# ─────────────────────────────────────────────────────────
+# 大区经理每日分配需求（合同有效期 ∩ 报货计划 + 订货计划均分）
+# ─────────────────────────────────────────────────────────
+
+_GRACE_DAYS_NO_END_DATE = 4
+
+
+def _contract_window_for_delivery_plan(delivery_plan_id: int) -> Optional[Tuple[date, date]]:
+    """
+    同一报货计划下所有「生效中」合同的生效起止（起取最早签订日，止取最晚截止日；
+    无 end_date 时按签订日 + 4 天截止，与合同失效逻辑一致）。
+    """
+    from app.services.contract_service import get_conn
+    from pymysql.cursors import DictCursor
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT contract_date, end_date
+                    FROM pd_contracts
+                    WHERE delivery_plan_id = %s AND status = '生效中'
+                    """,
+                    (delivery_plan_id,),
+                )
+                rows = cur.fetchall() or []
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+
+    starts: List[date] = []
+    ends: List[date] = []
+    for r in rows:
+        cd = r.get("contract_date")
+        ed = r.get("end_date")
+        if hasattr(cd, "date"):
+            cd = cd.date()
+        if hasattr(ed, "date"):
+            ed = ed.date()
+        if cd is None:
+            continue
+        starts.append(cd)
+        if ed is not None:
+            ends.append(ed)
+        else:
+            ends.append(cd + timedelta(days=_GRACE_DAYS_NO_END_DATE))
+
+    if not starts or not ends:
+        return None
+
+    return min(starts), max(ends)
+
+
+def _delivered_trucks_for_order_plan(order_plan_id: int) -> int:
+    """订货计划已发车辆（报单统计，与合同已发车口径一致）。"""
+    from app.services.contract_service import get_conn
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM pd_deliveries
+                    WHERE order_plan_id = %s
+                      AND status IN ('已发货', '已装车', '在途', '已签收')
+                    """,
+                    (order_plan_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return 0
+                n = row["n"] if isinstance(row, dict) else row[0]
+                return int(n or 0)
+    except Exception:
+        return 0
+
+
+def _spread_integer_total(total: int, num_slots: int) -> List[int]:
+    """将 total 均分到 num_slots 份，前 remainder 份多 1。"""
+    if num_slots <= 0:
+        return []
+    if total <= 0:
+        return [0] * num_slots
+    base = total // num_slots
+    rem = total % num_slots
+    return [base + (1 if i < rem else 0) for i in range(num_slots)]
+
+
+def compute_manager_daily_allocation(
+    *,
+    today: Optional[date] = None,
+) -> Dict[str, Any]:
+    """
+    基于生效中合同在报货计划上的生效期限，以及审核中/审核通过的订货计划车数，
+    将剩余车数在有效日区间内均分，得到每位大区经理每日运货量（吨）。
+
+    仅包含「当日及未来」的日期；无订货计划或有效天数为 0 的不产出条目。
+    """
+    from app.services.contract_service import get_conn
+    from pymysql.cursors import DictCursor
+
+    if today is None:
+        today = datetime.now().date()
+
+    # date_str -> manager_name -> { truck_count, tonnage, order_plan_ids }
+    by_date_mgr: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(
+        lambda: defaultdict(
+            lambda: {"truck_count": 0, "tonnage": 0.0, "order_plan_ids": []}
+        )
+    )
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        op.id AS order_plan_id,
+                        op.delivery_plan_id,
+                        op.truck_count,
+                        op.created_by_name,
+                        op.plan_no,
+                        dp.plan_start_date,
+                        dp.plan_status
+                    FROM pd_order_plans op
+                    INNER JOIN pd_delivery_plans dp ON dp.id = op.delivery_plan_id
+                    WHERE op.audit_status IN ('待审核', '审核通过')
+                      AND (dp.plan_status = '生效中' OR dp.plan_status IS NULL OR dp.plan_status = '')
+                    ORDER BY op.id
+                    """
+                )
+                order_rows = cur.fetchall() or []
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "tonnage_per_truck": TONS_PER_TRUCK,
+            "days": [],
+            "meta": {},
+        }
+
+    for row in order_rows:
+        op_id = int(row["order_plan_id"])
+        delivery_plan_id = int(row["delivery_plan_id"])
+        truck_cap = int(row.get("truck_count") or 0)
+        manager = (row.get("created_by_name") or "").strip() or "未指定"
+        psd = row.get("plan_start_date")
+        if hasattr(psd, "date"):
+            psd = psd.date()
+
+        window = _contract_window_for_delivery_plan(delivery_plan_id)
+        if not window:
+            continue
+        eff_start, eff_end = window
+
+        if psd is not None:
+            eff_start = max(eff_start, psd)
+
+        # 仅当日及未来
+        window_start = max(today, eff_start)
+        window_end = eff_end
+        if window_start > window_end:
+            continue
+
+        date_list = _date_range(
+            window_start.strftime("%Y-%m-%d"),
+            window_end.strftime("%Y-%m-%d"),
+        )
+        # 再保险：只要 >= today
+        date_list = [d for d in date_list if d >= today.strftime("%Y-%m-%d")]
+        n_days = len(date_list)
+        if n_days == 0 or truck_cap <= 0:
+            continue
+
+        delivered = _delivered_trucks_for_order_plan(op_id)
+        remaining = max(0, truck_cap - delivered)
+        if remaining <= 0:
+            continue
+
+        per_day = _spread_integer_total(remaining, n_days)
+        for d_str, trucks in zip(date_list, per_day):
+            if trucks <= 0:
+                continue
+            slot = by_date_mgr[d_str][manager]
+            slot["truck_count"] += trucks
+            slot["tonnage"] = round(float(slot["truck_count"]) * TONS_PER_TRUCK, 3)
+            if op_id not in slot["order_plan_ids"]:
+                slot["order_plan_ids"].append(op_id)
+
+    # 组装 days 列表（按日期排序）
+    sorted_dates = sorted(by_date_mgr.keys())
+    days_out: List[Dict[str, Any]] = []
+    for d in sorted_dates:
+        mgr_map = by_date_mgr[d]
+        by_manager: List[Dict[str, Any]] = []
+        total_trucks = 0
+        total_tonnage = 0.0
+        for name in sorted(mgr_map.keys()):
+            info = mgr_map[name]
+            tc = int(info["truck_count"])
+            tn = float(info["tonnage"])
+            total_trucks += tc
+            total_tonnage += tn
+            by_manager.append(
+                {
+                    "manager_name": name,
+                    "truck_count": tc,
+                    "tonnage": round(tn, 3),
+                    "order_plan_ids": sorted(info["order_plan_ids"]),
+                }
+            )
+        days_out.append(
+            {
+                "date": d,
+                "by_manager": by_manager,
+                "total_trucks": total_trucks,
+                "total_tonnage": round(total_tonnage, 3),
+            }
+        )
+
+    return {
+        "success": True,
+        "tonnage_per_truck": TONS_PER_TRUCK,
+        "days": days_out,
+        "meta": {
+            "today": today.isoformat(),
+            "date_count": len(days_out),
+        },
+    }
 
 
