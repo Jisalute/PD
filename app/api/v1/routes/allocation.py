@@ -8,7 +8,7 @@ import random
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Query, Body
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.allocation_service import (
     compute_manager_daily_allocation,
@@ -16,6 +16,8 @@ from app.services.allocation_service import (
     get_warehouses,
     get_warehouse_daily_capacity,
     solve_dispatch_plan,
+    save_predictions_to_db,
+    get_filter_options,
 )
 from app.services.contract_service import get_conn
 
@@ -26,27 +28,39 @@ router = APIRouter(prefix="/allocation", tags=["分配规划"])
 # ============ 响应模型 ============
 
 class AllocationPlanResponse(BaseModel):
-    """分配计划响应"""
-    success: bool = True
-    message: str = "调度计划生成成功"
-    plan: dict  # {仓库: {合同编号: {冶炼厂: {日期: 车数}}}}
-    meta: dict  # 元数据
+    """分配计划响应：含排产方案与求解元数据。"""
+
+    model_config = ConfigDict(title="分配计划响应")
+
+    success: bool = Field(True, description="是否成功")
+    message: str = Field("调度计划生成成功", description="提示信息")
+    plan: dict = Field(
+        ...,
+        description="排产方案：仓库 → 合同编号 → 冶炼厂 → 日期 → 车数",
+    )
+    meta: dict = Field(..., description="元数据（求解状态、时间窗口、车数汇总等）")
 
 
 class ContractStatusResponse(BaseModel):
-    """合同状态响应"""
-    contract_no: str
-    smelter_company: str
-    total_quantity: float
-    total_trucks: int
-    delivered_trucks: int
-    remaining_trucks: int
+    """单份生效合同的进度概况。"""
+
+    model_config = ConfigDict(title="合同状态项")
+
+    contract_no: str = Field(..., description="合同编号")
+    smelter_company: str = Field(..., description="冶炼厂名称")
+    total_quantity: float = Field(..., description="合同总吨位")
+    total_trucks: int = Field(..., description="需求总车数")
+    delivered_trucks: int = Field(..., description="已发车数（报单条数）")
+    remaining_trucks: int = Field(..., description="剩余车数")
 
 
 class ContractsStatusResponse(BaseModel):
-    """合同状态列表响应"""
-    success: bool = True
-    contracts: list[ContractStatusResponse]
+    """生效合同状态列表。"""
+
+    model_config = ConfigDict(title="合同状态列表响应")
+
+    success: bool = Field(True, description="是否成功")
+    contracts: list[ContractStatusResponse] = Field(..., description="合同状态列表")
 
 
 class ManagerDailyDemandResponse(BaseModel):
@@ -58,29 +72,87 @@ class ManagerDailyDemandResponse(BaseModel):
 
 
 class SetupTestDataRequest(BaseModel):
-    """设置测试数据请求"""
-    num_contracts: int = Field(5, ge=1, le=20, description="合同数量")
-    num_deliveries_per_contract: int = Field(2, ge=0, le=5, description="每个合同的报单数量")
-    num_weighbills_per_contract: int = Field(1, ge=0, le=3, description="每个合同的磅单数量")
-    contract_prefix: str = Field("TEST", description="合同编号前缀")
+    """写入分配规划联调用的测试合同/报单/磅单。"""
+
+    model_config = ConfigDict(title="设置测试数据请求")
+
+    num_contracts: int = Field(5, ge=1, le=20, description="要生成的测试合同数量")
+    num_deliveries_per_contract: int = Field(
+        2, ge=0, le=5, description="每个合同最多生成的报货（销售台账）条数"
+    )
+    num_weighbills_per_contract: int = Field(
+        1, ge=0, le=3, description="每个合同最多生成的磅单条数"
+    )
+    contract_prefix: str = Field("TEST", description="合同编号前缀，用于区分测试数据")
 
 
 class SetupTestDataResponse(BaseModel):
-    """设置测试数据响应"""
-    success: bool = True
-    message: str
-    inserted_contracts: int
-    inserted_deliveries: int
-    inserted_weighbills: int
+    """设置测试数据后的统计结果。"""
+
+    model_config = ConfigDict(title="设置测试数据响应")
+
+    success: bool = Field(True, description="是否成功")
+    message: str = Field(..., description="结果说明")
+    inserted_contracts: int = Field(..., description="新插入的合同数")
+    inserted_deliveries: int = Field(..., description="新插入的报单数")
+    inserted_weighbills: int = Field(..., description="新插入的磅单数")
 
 
 class CleanupTestDataResponse(BaseModel):
-    """清理测试数据响应"""
-    success: bool = True
-    message: str
-    deleted_contracts: int
-    deleted_deliveries: int
-    deleted_weighbills: int
+    """按前缀清理测试数据后的统计结果。"""
+
+    model_config = ConfigDict(title="清理测试数据响应")
+
+    success: bool = Field(True, description="是否成功")
+    message: str = Field(..., description="结果说明")
+    deleted_contracts: int = Field(..., description="删除的合同数")
+    deleted_deliveries: int = Field(..., description="删除的报单数")
+    deleted_weighbills: int = Field(..., description="删除的磅单数")
+
+
+class WarehousesListResponse(BaseModel):
+    """仓库名称列表。"""
+
+    model_config = ConfigDict(title="仓库列表响应")
+
+    success: bool = Field(True, description="是否成功")
+    warehouses: list[str] = Field(..., description="仓库名称列表")
+    count: int = Field(..., description="仓库数量")
+
+
+class WarehouseCapacityResponse(BaseModel):
+    """各仓库每日最大可发车数（当前为服务层模拟值）。"""
+
+    model_config = ConfigDict(title="仓库日产能响应")
+
+    success: bool = Field(True, description="是否成功")
+    daily_capacity: dict[str, int] = Field(
+        ...,
+        description="仓库名称 → 每日最大车数",
+    )
+
+
+class ActiveContractItemResponse(BaseModel):
+    """参与排产的单条合同（已按截至日扣减已发车）。"""
+
+    model_config = ConfigDict(title="生效合同项")
+
+    contract_no: str = Field(..., description="合同编号")
+    smelter: str = Field(..., description="冶炼厂")
+    total_tons: float = Field(..., description="剩余需求吨位")
+    total_trucks: int = Field(..., description="剩余需求车数")
+    start_date: str = Field(..., description="合同开始日期")
+    end_date: str = Field(..., description="合同结束日期")
+
+
+class ActiveContractsListResponse(BaseModel):
+    """生效合同列表（供排产读取）。"""
+
+    model_config = ConfigDict(title="生效合同列表响应")
+
+    success: bool = Field(True, description="是否成功")
+    contracts: list[ActiveContractItemResponse] = Field(..., description="合同列表")
+    count: int = Field(..., description="合同条数")
 
 
 # ============ 辅助函数 ============
@@ -92,16 +164,21 @@ def _get_db_conn():
 
 def _setup_warehouses():
     """设置仓库"""
-    warehouses = ['河南金铅仓库', '河北仓库', '山东仓库', '山西仓库']
+    warehouses = [
+        ('河南金铅仓库', '张经理'),
+        ('河北仓库', '李经理'),
+        ('山东仓库', '王经理'),
+        ('山西仓库', '赵经理')
+    ]
 
     with _get_db_conn() as conn:
         with conn.cursor() as cur:
-            for name in warehouses:
+            for name, manager in warehouses:
                 try:
                     cur.execute(
-                        'INSERT INTO pd_warehouses (warehouse_name, is_active, created_at, updated_at) '
-                        'VALUES (%s, 1, NOW(), NOW())',
-                        (name,)
+                        'INSERT INTO pd_warehouses (warehouse_name, regional_manager, is_active, created_at, updated_at) '
+                        'VALUES (%s, %s, 1, NOW(), NOW())',
+                        (name, manager)
                     )
                 except Exception as e:
                     if 'Duplicate entry' not in str(e):
@@ -258,9 +335,16 @@ def _cleanup_test_data(prefix: str = "TEST") -> dict:
     return deleted
 
 
-# ============ 路由 ============
+def _save_predictions_to_db(plan: dict, prediction_date: str, is_test: bool = False):
+    """保存预测结果到数据库"""
+    save_predictions_to_db(plan, prediction_date, is_test)
 
-@router.post("/test-data/setup", response_model=SetupTestDataResponse)
+@router.post(
+    "/test-data/setup",
+    summary="写入分配规划测试数据",
+    response_description="返回本次插入的合同、报单、磅单数量",
+    response_model=SetupTestDataResponse,
+)
 async def setup_test_data(request: SetupTestDataRequest = Body(...)):
     """
     设置测试数据
@@ -274,41 +358,51 @@ async def setup_test_data(request: SetupTestDataRequest = Body(...)):
     用于在没有真实数据时测试分配规划功能
     """
     try:
-        # 1. 设置仓库
         _setup_warehouses()
 
-        # 2. 插入测试合同
         contracts = _insert_test_contracts(
             num_contracts=request.num_contracts,
-            prefix=request.contract_prefix
+            prefix=request.contract_prefix,
         )
 
-        # 3. 插入测试报单
         deliveries_count = _insert_test_deliveries(
             contracts=contracts,
-            max_per_contract=request.num_deliveries_per_contract
+            max_per_contract=request.num_deliveries_per_contract,
         )
 
-        # 4. 插入测试磅单
         weighbills_count = _insert_test_weighbills(
             contracts=contracts,
-            max_per_contract=request.num_weighbills_per_contract
+            max_per_contract=request.num_weighbills_per_contract,
         )
 
         return SetupTestDataResponse(
             success=True,
-            message=f"测试数据设置成功: {len(contracts)}个合同, {deliveries_count}个报单, {weighbills_count}个磅单",
+            message=(
+                f"测试数据设置成功: {len(contracts)}个合同, "
+                f"{deliveries_count}个报单, {weighbills_count}个磅单"
+            ),
             inserted_contracts=len(contracts),
             inserted_deliveries=deliveries_count,
-            inserted_weighbills=weighbills_count
+            inserted_weighbills=weighbills_count,
         )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"设置测试数据失败: {str(e)}")
 
 
-@router.post("/test-data/cleanup", response_model=CleanupTestDataResponse)
-async def cleanup_test_data(prefix: str = "TEST"):
+@router.post(
+    "/test-data/cleanup",
+    summary="清理分配规划测试数据",
+    response_description="按合同编号前缀删除测试合同及关联报单、磅单",
+    response_model=CleanupTestDataResponse,
+)
+async def cleanup_test_data(
+    prefix: str = Query(
+        "TEST",
+        title="合同编号前缀",
+        description="测试合同编号前缀，仅删除合同编号以此前缀开头的数据",
+    ),
+):
     """
     清理测试数据
 
@@ -332,7 +426,12 @@ async def cleanup_test_data(prefix: str = "TEST"):
         raise HTTPException(status_code=500, detail=f"清理测试数据失败: {str(e)}")
 
 
-@router.get("/status", response_model=ContractsStatusResponse)
+@router.get(
+    "/status",
+    summary="查询生效合同进度",
+    response_description="各合同总车数、已发车、剩余车数",
+    response_model=ContractsStatusResponse,
+)
 async def get_contracts_status():
     """
     获取所有生效中合同的状态(含已发车数)
@@ -342,9 +441,8 @@ async def get_contracts_status():
     - 已发车数
     - 剩余车数
     """
-    contracts_status = []
-
     try:
+        contracts_status = []
         with _get_db_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -387,26 +485,35 @@ async def get_contracts_status():
         raise HTTPException(status_code=500, detail=f"获取合同状态失败: {str(e)}")
 
 
-@router.get("/plan", response_model=AllocationPlanResponse)
+@router.get(
+    "/plan",
+    summary="生成调度分配计划",
+    response_description="线性规划排产结果及 meta 元数据",
+    response_model=AllocationPlanResponse,
+)
 async def generate_allocation_plan(
     window_start: Optional[str] = Query(
         None,
-        description="规划窗口起始日期(YYYY-MM-DD),默认今天"
+        title="规划窗口起始日",
+        description="规划窗口起始日期，格式 YYYY-MM-DD；不传则默认为当天",
     ),
     H: int = Query(
         10,
         ge=1,
         le=30,
-        description="规划窗口天数(1-30天)"
+        title="规划窗口天数",
+        description="从起始日起连续规划的天数，取值 1～30",
     ),
     as_of_date: Optional[str] = Query(
         None,
-        description="截至日期(用于计算已发车数),默认与window_start相同"
+        title="已发车统计截至日",
+        description="计算已发车数时截至该日；不传则与规划窗口起始日相同",
     ),
     include_solver_log: bool = Query(
         False,
-        description="是否包含求解器日志"
-    )
+        title="返回求解器日志",
+        description="为 true 时在求解过程中附带求解器输出（便于排查不可行等问题）",
+    ),
 ):
     """
     生成调度分配计划
@@ -451,7 +558,7 @@ async def generate_allocation_plan(
             daily_cap=daily_cap,
             window_start=window_start,
             window_end=window_end,
-            solver_msg=include_solver_log
+            solver_msg=include_solver_log,
         )
 
         meta = {
@@ -475,40 +582,51 @@ async def generate_allocation_plan(
         if status not in ("Optimal", "Feasible"):
             raise HTTPException(status_code=500, detail=f"规划求解失败: {status}")
 
+        _save_predictions_to_db(plan, window_start, is_test=False)
+
         return AllocationPlanResponse(
             success=True,
             message="调度计划生成成功",
             plan=plan,
-            meta=meta
+            meta=meta,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"生成调度计划失败: {str(e)}")
 
 
-@router.get("/warehouses")
+@router.get(
+    "/warehouses",
+    summary="获取仓库列表",
+    response_description="当前启用仓库名称及数量",
+    response_model=WarehousesListResponse,
+)
 async def get_warehouses_list():
     """获取所有仓库列表"""
     try:
         warehouses = get_warehouses()
-        return {
-            "success": True,
-            "warehouses": warehouses,
-            "count": len(warehouses)
-        }
+        return WarehousesListResponse(
+            success=True,
+            warehouses=warehouses,
+            count=len(warehouses),
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仓库列表失败: {str(e)}")
 
 
-@router.get("/capacity")
+@router.get(
+    "/capacity",
+    summary="获取各仓库日产能",
+    response_description="各仓库每日最大可发车数",
+    response_model=WarehouseCapacityResponse,
+)
 async def get_warehouse_capacity():
     """获取各仓库每日发货能力"""
     try:
         capacity = get_warehouse_daily_capacity()
-        return {
-            "success": True,
-            "daily_capacity": capacity
-        }
+        return WarehouseCapacityResponse(success=True, daily_capacity=capacity)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仓库产能失败: {str(e)}")
 
@@ -545,35 +663,56 @@ async def get_manager_daily_demand():
         raise HTTPException(status_code=500, detail=f"分配需求计算失败: {str(e)}")
 
 
-@router.get("/contracts")
+@router.get(
+    "/contracts",
+    summary="获取生效合同列表（排产输入）",
+    response_description="已按默认规则扣减已发车的合同需求，供排产使用",
+    response_model=ActiveContractsListResponse,
+)
 async def get_active_contracts_list():
     """获取所有生效中的合同(含已发车调整)"""
     try:
         contracts = get_active_contracts()
         contracts_data = [
-            {
-                "contract_no": c.contract_no,
-                "smelter": c.smelter,
-                "total_tons": c.total_tons,
-                "total_trucks": c.total_trucks,
-                "start_date": c.start_date,
-                "end_date": c.end_date
-            }
+            ActiveContractItemResponse(
+                contract_no=c.contract_no,
+                smelter=c.smelter,
+                total_tons=c.total_tons,
+                total_trucks=c.total_trucks,
+                start_date=c.start_date,
+                end_date=c.end_date,
+            )
             for c in contracts
         ]
-        return {
-            "success": True,
-            "contracts": contracts_data,
-            "count": len(contracts)
-        }
+        return ActiveContractsListResponse(
+            success=True,
+            contracts=contracts_data,
+            count=len(contracts),
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取合同列表失败: {str(e)}")
 
 
-@router.post("/test_plan")
+@router.post(
+    "/test_plan",
+    summary="一键联调：造数并生成计划",
+    response_description="含测试数据统计、排产 plan 与 meta",
+)
 async def test_plan(
-    num_contracts: int = Query(3, ge=1, le=10, description="测试合同数量"),
-    H: int = Query(7, ge=1, le=30, description="规划窗口天数")
+    num_contracts: int = Query(
+        3,
+        ge=1,
+        le=10,
+        title="测试合同数量",
+        description="本次插入的测试合同条数",
+    ),
+    H: int = Query(
+        7,
+        ge=1,
+        le=30,
+        title="规划窗口天数",
+        description="排产覆盖的天数",
+    ),
 ):
     """
     测试完整流程: 插入测试数据 + 生成调度计划
@@ -584,47 +723,13 @@ async def test_plan(
     3. 生成调度计划
     """
     try:
-        prefix = "TESTPLAN"
-
-        # 1. 清理旧数据
-        _cleanup_test_data(prefix=prefix)
-
-        # 2. 设置仓库
-        _setup_warehouses()
-
-        # 3. 插入测试合同
-        contracts = _insert_test_contracts(num_contracts=num_contracts, prefix=prefix)
-
-        # 4. 生成调度计划
-        window_start = datetime.now().strftime("%Y-%m-%d")
-        contracts_data = get_active_contracts(as_of_date=window_start)
-        warehouses = get_warehouses()
-        daily_cap = get_warehouse_daily_capacity()
-        window_end = (datetime.now() + timedelta(days=H - 1)).strftime("%Y-%m-%d")
-
-        plan, status = solve_dispatch_plan(
-            contracts=contracts_data,
-            warehouses=warehouses,
-            daily_cap=daily_cap,
-            window_start=window_start,
-            window_end=window_end,
-            solver_msg=False
-        )
-
+        managers, smelters, contracts = get_filter_options()
         return {
             "success": True,
-            "message": f"测试完成: 创建{len(contracts)}个合同并生成{H}天调度计划",
-            "test_data": {
-                "inserted_contracts": len(contracts),
-                "contract_prefix": prefix
-            },
-            "plan": plan,
-            "meta": {
-                "solver_status": status,
-                "window_start": window_start,
-                "window_end": window_end,
-                "H": H
-            }
+            "regional_managers": managers,
+            "smelters": smelters,
+            "contracts": contracts
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"测试流程失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取筛选选项失败: {str(e)}")
+
