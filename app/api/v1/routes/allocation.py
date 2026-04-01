@@ -14,7 +14,10 @@ from app.services.allocation_service import (
     get_active_contracts,
     get_warehouses,
     get_warehouse_daily_capacity,
-    solve_dispatch_plan
+    solve_dispatch_plan,
+    save_predictions_to_db,
+    get_predictions,
+    get_filter_options
 )
 from app.services.contract_service import get_conn
 
@@ -153,16 +156,21 @@ def _get_db_conn():
 
 def _setup_warehouses():
     """设置仓库"""
-    warehouses = ['河南金铅仓库', '河北仓库', '山东仓库', '山西仓库']
+    warehouses = [
+        ('河南金铅仓库', '张经理'),
+        ('河北仓库', '李经理'),
+        ('山东仓库', '王经理'),
+        ('山西仓库', '赵经理')
+    ]
 
     with _get_db_conn() as conn:
         with conn.cursor() as cur:
-            for name in warehouses:
+            for name, manager in warehouses:
                 try:
                     cur.execute(
-                        'INSERT INTO pd_warehouses (warehouse_name, is_active, created_at, updated_at) '
-                        'VALUES (%s, 1, NOW(), NOW())',
-                        (name,)
+                        'INSERT INTO pd_warehouses (warehouse_name, regional_manager, is_active, created_at, updated_at) '
+                        'VALUES (%s, %s, 1, NOW(), NOW())',
+                        (name, manager)
                     )
                 except Exception as e:
                     if 'Duplicate entry' not in str(e):
@@ -319,7 +327,9 @@ def _cleanup_test_data(prefix: str = "TEST") -> dict:
     return deleted
 
 
-# ============ 路由 ============
+def _save_predictions_to_db(plan: dict, prediction_date: str, is_test: bool = False):
+    """保存预测结果到数据库"""
+    save_predictions_to_db(plan, prediction_date, is_test)
 
 @router.post(
     "/test-data/setup",
@@ -331,42 +341,31 @@ async def setup_test_data(request: SetupTestDataRequest = Body(...)):
     """
     设置测试数据
 
-    功能:
-    - 创建指定数量的测试合同
-    - 为每个合同创建报单
-    - 为每个合同创建磅单
-    - 自动设置仓库
+def run_test_prediction(num_contracts: int = 5, H: int = 10):
+    """
+    测试预测函数（后端定时任务）
 
-    用于在没有真实数据时测试分配规划功能
+    生成测试数据并运行预测，保存结果到数据库
     """
     try:
-        # 1. 设置仓库
+        prefix = "TESTPLAN"
+        _cleanup_test_data(prefix=prefix)
         _setup_warehouses()
+        _insert_test_contracts(num_contracts=num_contracts, prefix=prefix)
 
-        # 2. 插入测试合同
-        contracts = _insert_test_contracts(
-            num_contracts=request.num_contracts,
-            prefix=request.contract_prefix
-        )
+        window_start = datetime.now().strftime("%Y-%m-%d")
+        contracts = get_active_contracts(as_of_date=window_start)
+        warehouses = get_warehouses()
+        daily_cap = get_warehouse_daily_capacity()
+        window_end = (datetime.now() + timedelta(days=H - 1)).strftime("%Y-%m-%d")
 
-        # 3. 插入测试报单
-        deliveries_count = _insert_test_deliveries(
+        plan, status = solve_dispatch_plan(
             contracts=contracts,
-            max_per_contract=request.num_deliveries_per_contract
-        )
-
-        # 4. 插入测试磅单
-        weighbills_count = _insert_test_weighbills(
-            contracts=contracts,
-            max_per_contract=request.num_weighbills_per_contract
-        )
-
-        return SetupTestDataResponse(
-            success=True,
-            message=f"测试数据设置成功: {len(contracts)}个合同, {deliveries_count}个报单, {weighbills_count}个磅单",
-            inserted_contracts=len(contracts),
-            inserted_deliveries=deliveries_count,
-            inserted_weighbills=weighbills_count
+            warehouses=warehouses,
+            daily_cap=daily_cap,
+            window_start=window_start,
+            window_end=window_end,
+            solver_msg=False
         )
 
     except Exception as e:
@@ -406,7 +405,7 @@ async def cleanup_test_data(
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"清理测试数据失败: {str(e)}")
+        print(f"测试预测异常: {e}")
 
 
 @router.get(
@@ -417,15 +416,10 @@ async def cleanup_test_data(
 )
 async def get_contracts_status():
     """
-    获取所有生效中合同的状态(含已发车数)
+    每日预测函数（后端定时任务）
 
-    返回每个合同的:
-    - 原始需求车数
-    - 已发车数
-    - 剩余车数
+    读取真实合同数据并运行预测，保存结果到数据库
     """
-    contracts_status = []
-
     try:
         with _get_db_conn() as conn:
             with conn.cursor() as cur:
@@ -523,18 +517,12 @@ async def generate_allocation_plan(
         contracts = get_active_contracts(as_of_date=as_of_date)
 
         if not contracts:
-            raise HTTPException(status_code=400, detail="无生效中的合同")
+            print("无生效中的合同，跳过预测")
+            return
 
         warehouses = get_warehouses()
-
-        if not warehouses:
-            raise HTTPException(status_code=400, detail="无可用仓库")
-
         daily_cap = get_warehouse_daily_capacity()
-
-        window_end = (
-            datetime.strptime(window_start, "%Y-%m-%d") + timedelta(days=H - 1)
-        ).strftime("%Y-%m-%d")
+        window_end = (datetime.now() + timedelta(days=H - 1)).strftime("%Y-%m-%d")
 
         plan, status = solve_dispatch_plan(
             contracts=contracts,
@@ -542,39 +530,17 @@ async def generate_allocation_plan(
             daily_cap=daily_cap,
             window_start=window_start,
             window_end=window_end,
-            solver_msg=include_solver_log
+            solver_msg=False
         )
 
-        meta = {
-            "solver_status": status,
-            "window_start": window_start,
-            "window_end": window_end,
-            "H": H,
-            "tons_per_truck": 35,
-            "contracts_count": len(contracts),
-            "smelters": sorted({c.smelter for c in contracts}),
-            "total_trucks_needed": sum(c.total_trucks for c in contracts),
-            "total_trucks_planned": sum(
-                cnt
-                for contract_map in plan.values()
-                for smelter_map in contract_map.values()
-                for date_map in smelter_map.values()
-                for cnt in date_map.values()
-            ),
-        }
-
-        if status not in ("Optimal", "Feasible"):
-            raise HTTPException(status_code=500, detail=f"规划求解失败: {status}")
-
-        return AllocationPlanResponse(
-            success=True,
-            message="调度计划生成成功",
-            plan=plan,
-            meta=meta
-        )
+        if status in ("Optimal", "Feasible"):
+            _save_predictions_to_db(plan, window_start, is_test=False)
+            print(f"每日预测完成: {window_start}, 状态: {status}")
+        else:
+            print(f"每日预测失败: {status}")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"生成调度计划失败: {str(e)}")
+        print(f"每日预测异常: {e}")
 
 
 @router.get(
@@ -610,6 +576,7 @@ async def get_warehouse_capacity():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仓库产能失败: {str(e)}")
 
+        predictions, prediction_date, total_trucks = get_predictions(manager_list, smelter_list, contract_list)
 
 @router.get(
     "/contracts",
@@ -638,7 +605,7 @@ async def get_active_contracts_list():
             count=len(contracts),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取合同列表失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"查询预测结果失败: {str(e)}")
 
 
 @router.post(
@@ -671,47 +638,13 @@ async def test_plan(
     3. 生成调度计划
     """
     try:
-        prefix = "TESTPLAN"
-
-        # 1. 清理旧数据
-        _cleanup_test_data(prefix=prefix)
-
-        # 2. 设置仓库
-        _setup_warehouses()
-
-        # 3. 插入测试合同
-        contracts = _insert_test_contracts(num_contracts=num_contracts, prefix=prefix)
-
-        # 4. 生成调度计划
-        window_start = datetime.now().strftime("%Y-%m-%d")
-        contracts_data = get_active_contracts(as_of_date=window_start)
-        warehouses = get_warehouses()
-        daily_cap = get_warehouse_daily_capacity()
-        window_end = (datetime.now() + timedelta(days=H - 1)).strftime("%Y-%m-%d")
-
-        plan, status = solve_dispatch_plan(
-            contracts=contracts_data,
-            warehouses=warehouses,
-            daily_cap=daily_cap,
-            window_start=window_start,
-            window_end=window_end,
-            solver_msg=False
-        )
-
+        managers, smelters, contracts = get_filter_options()
         return {
             "success": True,
-            "message": f"测试完成: 创建{len(contracts)}个合同并生成{H}天调度计划",
-            "test_data": {
-                "inserted_contracts": len(contracts),
-                "contract_prefix": prefix
-            },
-            "plan": plan,
-            "meta": {
-                "solver_status": status,
-                "window_start": window_start,
-                "window_end": window_end,
-                "H": H
-            }
+            "regional_managers": managers,
+            "smelters": smelters,
+            "contracts": contracts
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"测试流程失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取筛选选项失败: {str(e)}")
+
