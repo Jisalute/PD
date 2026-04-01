@@ -11,10 +11,11 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel, Field
 
 from app.services.allocation_service import (
+    compute_manager_daily_allocation,
     get_active_contracts,
     get_warehouses,
     get_warehouse_daily_capacity,
-    solve_dispatch_plan
+    solve_dispatch_plan,
 )
 from app.services.contract_service import get_conn
 
@@ -46,6 +47,14 @@ class ContractsStatusResponse(BaseModel):
     """合同状态列表响应"""
     success: bool = True
     contracts: list[ContractStatusResponse]
+
+
+class ManagerDailyDemandResponse(BaseModel):
+    """大区经理每日分配需求（当日及未来）"""
+    success: bool = True
+    tonnage_per_truck: int = 35
+    days: list
+    meta: dict
 
 
 class SetupTestDataRequest(BaseModel):
@@ -502,6 +511,38 @@ async def get_warehouse_capacity():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仓库产能失败: {str(e)}")
+
+
+@router.get(
+    "/manager-daily-demand",
+    response_model=ManagerDailyDemandResponse,
+    summary="分配需求：大区经理每日运货量",
+)
+async def get_manager_daily_demand():
+    """
+    依据生效中合同在该报货计划上的生效期限（多份合同取最早起始、最晚截止；
+    无截止日期时按签订日起 4 天），叠加报货计划 `plan_start_date`，
+    将订货计划（待审核/审核通过）剩余车数在有效日内均分，按大区经理汇总每日吨数与车数。
+
+    仅返回**当日及未来**的日期；已无剩余车数的订货计划不参与。
+    """
+    try:
+        result = compute_manager_daily_allocation()
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("error") or "计算分配需求失败",
+            )
+        return ManagerDailyDemandResponse(
+            success=True,
+            tonnage_per_truck=int(result.get("tonnage_per_truck") or 35),
+            days=result.get("days") or [],
+            meta=result.get("meta") or {},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"分配需求计算失败: {str(e)}")
 
 
 @router.get("/contracts")
