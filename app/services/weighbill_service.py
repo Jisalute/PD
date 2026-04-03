@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = UPLOADS_DIR / "weighbills"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+_WEIGHBILL_AUDIT_COLS_ENSURED = False
+
 
 class WeighbillService:
     """磅单服务"""
@@ -64,6 +66,41 @@ class WeighbillService:
             self._weighbill_has_warehouse_name = False
 
         return self._weighbill_has_warehouse_name
+
+    def _ensure_weighbill_audit_columns(self) -> None:
+        """旧库补全 audit_status / audit_remark（仅执行一次成功的 ensure）。"""
+        global _WEIGHBILL_AUDIT_COLS_ENSURED
+        if _WEIGHBILL_AUDIT_COLS_ENSURED:
+            return
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    parts: list[str] = []
+                    cur.execute("SHOW COLUMNS FROM pd_weighbills LIKE 'audit_status'")
+                    if not cur.fetchone():
+                        parts.append(
+                            "ADD COLUMN audit_status VARCHAR(32) DEFAULT '待审核' "
+                            "COMMENT '磅单审核状态：待审核/审核通过/审核未通过'"
+                        )
+                    cur.execute("SHOW COLUMNS FROM pd_weighbills LIKE 'audit_remark'")
+                    if not cur.fetchone():
+                        parts.append(
+                            "ADD COLUMN audit_remark TEXT DEFAULT NULL COMMENT '审核备注'"
+                        )
+                    if parts:
+                        cur.execute("ALTER TABLE pd_weighbills " + ", ".join(parts))
+                        try:
+                            cur.execute(
+                                "ALTER TABLE pd_weighbills ADD INDEX idx_audit_status (audit_status)"
+                            )
+                        except Exception:
+                            pass
+                    cur.execute("SHOW COLUMNS FROM pd_weighbills LIKE 'audit_status'")
+                    self._weighbill_has_audit_columns = cur.fetchone() is not None
+                conn.commit()
+            _WEIGHBILL_AUDIT_COLS_ENSURED = bool(self._weighbill_has_audit_columns)
+        except Exception as e:
+            logger.warning("补全磅单审核字段失败（可手工执行 database_setup.ensure_weighbill_audit_columns）: %s", e)
 
     def _has_weighbill_audit_columns(self) -> bool:
         """兼容旧库：检查 pd_weighbills 是否有 audit_status 字段"""
@@ -1319,7 +1356,8 @@ class WeighbillService:
                     data["operations"] = {
                         "can_upload": not is_uploaded,
                         "can_modify": is_uploaded,
-                        "can_view": is_uploaded
+                        "can_view": is_uploaded,
+                        "can_set_payment_schedule": is_uploaded,
                     }
 
                     return data
@@ -1586,7 +1624,8 @@ class WeighbillService:
                         wb["operations"] = {
                             "can_upload": not is_uploaded,
                             "can_modify": is_uploaded,
-                            "can_view": is_uploaded
+                            "can_view": is_uploaded,
+                            "can_set_payment_schedule": is_uploaded,
                         }
 
                         if delivery_id not in weighbill_map:
@@ -1645,7 +1684,12 @@ class WeighbillService:
                                     "payable_unit_price": None,
                                     "payable_amount_calculated": None,
                                     "receivable_amount_calculated": None,
-                                    "operations": {"can_upload": True, "can_modify": False, "can_view": False}
+                                    "operations": {
+                                        "can_upload": True,
+                                        "can_modify": False,
+                                        "can_view": False,
+                                        "can_set_payment_schedule": False,
+                                    }
                                 }
                                 if self._has_weighbill_audit_columns():
                                     placeholder["audit_status"] = "待审核"
@@ -1694,9 +1738,23 @@ class WeighbillService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT id FROM pd_weighbills WHERE id = %s", (weighbill_id,))
-                    if not cur.fetchone():
+                    cur.execute(
+                        """
+                        SELECT id, upload_status, weighbill_image
+                        FROM pd_weighbills WHERE id = %s
+                        """,
+                        (weighbill_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
                         return {"success": False, "error": "磅单不存在"}
+                    us = row[1] if not isinstance(row, dict) else row.get("upload_status")
+                    img = row[2] if not isinstance(row, dict) else row.get("weighbill_image")
+                    if us != "已上传" or not (img and str(img).strip()):
+                        return {
+                            "success": False,
+                            "error": "请先上传磅单图片（联单）后再排期；当前状态为待上传或未保存图片路径",
+                        }
 
                     # 更新磅单排款日期
                     cur.execute("""
@@ -1794,8 +1852,12 @@ class WeighbillService:
             if not remark:
                 return {"success": False, "error": "审核未通过时必须填写审核备注"}
 
+        self._ensure_weighbill_audit_columns()
         if not self._has_weighbill_audit_columns():
-            return {"success": False, "error": "磅单审核功能未启用"}
+            return {
+                "success": False,
+                "error": "磅单审核功能未启用：数据库缺少 audit_status 列且自动补全失败，请执行库迁移或联系管理员",
+            }
 
         try:
             with get_conn() as conn:

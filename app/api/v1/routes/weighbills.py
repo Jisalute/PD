@@ -713,13 +713,18 @@ async def set_payment_schedule(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/{weighbill_id}/audit", summary="磅单审核", response_model=dict)
+@router.api_route(
+    "/{weighbill_id}/audit",
+    methods=["PUT", "POST"],
+    summary="磅单审核",
+    response_model=dict,
+)
 async def audit_weighbill(
-        weighbill_id: int,
-        request: WeighbillAuditRequest,
-        service: WeighbillService = Depends(get_weighbill_service)
+    weighbill_id: int,
+    request: WeighbillAuditRequest,
+    service: WeighbillService = Depends(get_weighbill_service),
 ):
-    """修改磅单审核状态。审核未通过时审核备注必填"""
+    """修改磅单审核状态。审核未通过时审核备注必填。支持 PUT 与 POST（与订货计划等审核接口方法对齐）。"""
     result = service.audit_weighbill(
         weighbill_id=weighbill_id,
         audit_status=request.audit_status,
