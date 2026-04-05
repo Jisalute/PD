@@ -5,6 +5,7 @@
 POST /allocation/purchase-quantity/query 同源逻辑）。
 """
 from datetime import datetime, timedelta
+from typing import Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,12 +36,12 @@ class GetPurchaseSuggestionRequest(BaseModel):
 
     warehouse_ids: list[int] = Field(default_factory=list)
     demands: list[_PurchaseSuggestionDemandItem] = Field(default_factory=list)
-    price_type: str | None = Field(None, description="旧字段，忽略")
-    start_date: str | None = Field(
+    price_type: Optional[str] = Field(None, description="旧字段，忽略")
+    start_date: Optional[str] = Field(
         None,
         description="可选；不传则默认当天起连续 7 天（含首尾）",
     )
-    end_date: str | None = Field(None, description="可选；须与 start_date 同传")
+    end_date: Optional[str] = Field(None, description="可选；须与 start_date 同传")
 
 
 @router.post(
@@ -78,7 +79,7 @@ async def get_purchase_suggestion(
             )
         extra["warehouse_names"] = names
 
-    raw = query_ai_purchase_quantity(start, end, **extra)
+    raw = query_ai_purchase_quantity(start, end, **extra, current_user=current_user)
 
     if raw.get("success") and raw.get("data") is not None:
         payload = PurchaseQuantityDataPayload(**raw["data"])
