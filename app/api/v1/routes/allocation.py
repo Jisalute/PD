@@ -673,9 +673,13 @@ async def get_contracts_status():
         raise HTTPException(status_code=500, detail=f"获取合同状态失败: {str(e)}")
 
 
-@router.get(
+@public_router.get(
     "/plan",
     summary="生成调度分配计划",
+    description=(
+        "**无需登录**：不要求 `Authorization`，可在内网或脚本中直接调用以写入 `pd_allocation_predictions`。\n\n"
+        "**注意**：会执行线性规划并改写数据库中对应 `prediction_date` 的快照，请勿对公网暴露或应配合网关鉴权。"
+    ),
     response_description="线性规划排产结果及 meta 元数据",
     response_model=AllocationPlanResponse,
 )
@@ -828,8 +832,10 @@ async def get_warehouse_capacity():
         "键名必须用 **英文双引号** 包裹；不要用 Python/JavaScript 单引号；不要尾逗号；不要注释。"
         "若出现 **422** 且 `json_invalid` / `Expecting property name enclosed in double quotes`，"
         "说明正文不是标准 JSON，请对照下方示例修正。\n\n"
+        "**前提**：库表 `pd_allocation_predictions` 中须已有预测数据（由 **GET /api/v1/allocation/plan** 生成并写入，该接口同样无需登录；"
+        "若从未调用或表为空，则 `plan` 恒为 `{}`，`message` 会提示先生成计划）。\n\n"
         "一次请求返回 `warehouse_options` 与 `plan`（仓库→合同→冶炼厂→日期→车数），"
-        "数据来自最近一次写入的 `pd_allocation_predictions`，按 `delivery_date` 落在请求区间内筛选。"
+        "数据来自最近一次写入的快照，按 `delivery_date` 落在请求区间内筛选。"
     ),
     response_description="校验参数、服务端筛选，返回下拉仓库列表与四层嵌套 plan",
     response_model=PurchaseQuantityQueryEnvelope,

@@ -453,6 +453,54 @@ def get_warehouse_names_by_ids(warehouse_ids: List[int]) -> List[str]:
     return names
 
 
+def _coerce_db_date(v: Any) -> Optional[date]:
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    s = str(v).strip()[:10]
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _scalar_cell(row: Any) -> Any:
+    if not row:
+        return None
+    if isinstance(row, dict):
+        return next(iter(row.values())) if row else None
+    return row[0]
+
+
+def _prediction_agg_row(row: Any) -> Tuple[Any, Any, Any, Any, Any]:
+    """聚合查询一行：兼容元组游标与 DictCursor。"""
+    if isinstance(row, dict):
+        return (
+            row.get("wh"),
+            row.get("contract_no"),
+            row.get("smelter_company"),
+            row.get("dday"),
+            row.get("tc"),
+        )
+    return row[0], row[1], row[2], row[3], row[4]
+
+
+def _min_max_delivery_row(row: Any) -> Tuple[Any, Any]:
+    if not row:
+        return None, None
+    if isinstance(row, dict):
+        vals = list(row.values())
+        if len(vals) >= 2:
+            return vals[0], vals[1]
+        if len(vals) == 1:
+            return vals[0], vals[0]
+        return None, None
+    return row[0], row[1]
+
+
 def query_ai_purchase_quantity(
     start_date: str,
     end_date: str,
@@ -468,6 +516,7 @@ def query_ai_purchase_quantity(
     统一查询：仓库下拉选项 + 预测 plan（仓库→合同→冶炼厂→日期→车数）。
     使用 `pd_allocation_predictions` 中最近一次 `prediction_date` 的全量快照，
     再按 `delivery_date` 落在 [start_date, end_date] 内筛选。
+    若请求区间与快照内实际发货日无交集，会自动用「交集区间」再查一次，避免 plan 全空（仍按请求区间补全每日键，无数据为 0）。
     大区经理仅可见本人名下仓库及 `regional_manager` 匹配的行；`warehouse` 须在可见列表内。
     """
     from app.services.contract_service import get_conn
@@ -507,15 +556,19 @@ def query_ai_purchase_quantity(
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT MAX(prediction_date) FROM pd_allocation_predictions")
-                row = cur.fetchone()
-                latest_pd = row[0] if row else None
+                latest_pd = _scalar_cell(cur.fetchone())
     except Exception as e:
         return _fail(f"查询预测数据失败: {e}", 500)
 
     if not latest_pd:
         return {
             "success": True,
-            "message": "暂无预测数据，请先生成调度分配计划",
+            "message": (
+                "表 pd_allocation_predictions 中尚无预测快照，故 plan 为空。"
+                "请先调用「生成调度分配计划」接口写入数据：GET /api/v1/allocation/plan"
+                "（无需登录；可选参数 window_start、H、as_of_date）。"
+                "成功后再调用本查询接口即可返回 plan。"
+            ),
             "data": {
                 "warehouse_options": warehouse_options,
                 "plan": {},
@@ -527,73 +580,139 @@ def query_ai_purchase_quantity(
     else:
         latest_pd_str = str(latest_pd)[:10]
 
-    conditions = [
-        "prediction_date = %s",
-        "delivery_date >= %s",
-        "delivery_date <= %s",
-    ]
-    params: List[Any] = [latest_pd_str, sd, ed]
+    base_conditions: List[str] = ["prediction_date = %s"]
+    base_params: List[Any] = [latest_pd_str]
 
     if current_user and (current_user.get("role") or "").strip() == "大区经理":
         mgr_name = (current_user.get("name") or "").strip()
         opts = warehouse_options
         if not mgr_name:
-            conditions.append("1=0")
+            base_conditions.append("1=0")
         elif opts:
             ph = ",".join(["%s"] * len(opts))
-            conditions.append(
+            base_conditions.append(
                 f"(warehouse_name IN ({ph}) OR TRIM(COALESCE(regional_manager, '')) = %s)"
             )
-            params.extend(opts)
-            params.append(mgr_name)
+            base_params.extend(opts)
+            base_params.append(mgr_name)
         else:
-            conditions.append("TRIM(COALESCE(regional_manager, '')) = %s")
-            params.append(mgr_name)
+            base_conditions.append("TRIM(COALESCE(regional_manager, '')) = %s")
+            base_params.append(mgr_name)
 
     if wh_list:
         ph = ",".join(["%s"] * len(wh_list))
-        conditions.append(f"warehouse_name IN ({ph})")
-        params.extend(wh_list)
+        base_conditions.append(f"warehouse_name IN ({ph})")
+        base_params.extend(wh_list)
     elif wh_filter:
-        conditions.append("warehouse_name = %s")
-        params.append(wh_filter)
+        base_conditions.append("warehouse_name = %s")
+        base_params.append(wh_filter)
     if cn_filter:
-        conditions.append("contract_no LIKE %s")
-        params.append(f"%{cn_filter}%")
+        base_conditions.append("contract_no LIKE %s")
+        base_params.append(f"%{cn_filter}%")
     if sm_filter:
-        conditions.append("smelter_company LIKE %s")
-        params.append(f"%{sm_filter}%")
+        base_conditions.append("smelter_company LIKE %s")
+        base_params.append(f"%{sm_filter}%")
 
     wh_expr = "COALESCE(NULLIF(TRIM(warehouse_name), ''), regional_manager, '未分配')"
 
-    sql = f"""
-        SELECT
-            {wh_expr} AS wh,
-            contract_no,
-            smelter_company,
-            DATE(delivery_date) AS dday,
-            SUM(truck_count) AS tc
-        FROM pd_allocation_predictions
-        WHERE {' AND '.join(conditions)}
-        GROUP BY {wh_expr}, contract_no, smelter_company, DATE(delivery_date)
-        ORDER BY wh, contract_no, smelter_company, dday
-    """
-
-    try:
+    def _fetch_aggregate(lo: str, hi: str) -> List[Any]:
+        conditions = base_conditions + ["delivery_date >= %s", "delivery_date <= %s"]
+        params = base_params + [lo, hi]
+        sql = f"""
+            SELECT
+                {wh_expr} AS wh,
+                contract_no,
+                smelter_company,
+                DATE(delivery_date) AS dday,
+                SUM(truck_count) AS tc
+            FROM pd_allocation_predictions
+            WHERE {' AND '.join(conditions)}
+            GROUP BY {wh_expr}, contract_no, smelter_company, DATE(delivery_date)
+            ORDER BY wh, contract_no, smelter_company, dday
+        """
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
-                rows = cur.fetchall() or []
+                return list(cur.fetchall() or [])
+
+    hint_msg = ""
+    try:
+        rows = _fetch_aggregate(sd, ed)
     except Exception as e:
         return _fail(f"查询预测明细失败: {e}", 500)
 
+    if not rows:
+        bound_sql = f"""
+            SELECT MIN(delivery_date), MAX(delivery_date)
+            FROM pd_allocation_predictions
+            WHERE {' AND '.join(base_conditions)}
+        """
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(bound_sql, base_params)
+                    brow = cur.fetchone()
+        except Exception as e:
+            return _fail(f"查询预测日期范围失败: {e}", 500)
+
+        dmin_raw, dmax_raw = _min_max_delivery_row(brow)
+        dmin = _coerce_db_date(dmin_raw)
+        dmax = _coerce_db_date(dmax_raw)
+
+        if dmin is None or dmax is None:
+            return {
+                "success": True,
+                "message": "当前预测快照下无明细（请检查仓库/合同/冶炼厂筛选是否过严，或先生成调度计划）",
+                "data": {
+                    "warehouse_options": warehouse_options,
+                    "plan": {},
+                },
+            }
+
+        eff_lo = max(d_start, dmin)
+        eff_hi = min(d_end, dmax)
+        if eff_lo > eff_hi:
+            return {
+                "success": True,
+                "message": (
+                    f"预测快照({latest_pd_str})内发货日为 {dmin.isoformat()}～{dmax.isoformat()}，"
+                    f"与查询区间 {sd}～{ed} 无交集；请将起止日期包含该区间后重试"
+                ),
+                "data": {
+                    "warehouse_options": warehouse_options,
+                    "plan": {},
+                },
+            }
+
+        lo_s, hi_s = eff_lo.strftime("%Y-%m-%d"), eff_hi.strftime("%Y-%m-%d")
+        try:
+            rows = _fetch_aggregate(lo_s, hi_s)
+        except Exception as e:
+            return _fail(f"查询预测明细失败: {e}", 500)
+
+        if not rows:
+            return {
+                "success": True,
+                "message": (
+                    f"快照发货日 {dmin.isoformat()}～{dmax.isoformat()} 与查询区间有交集，"
+                    "但聚合结果为空，请检查仓库/合同/冶炼厂筛选或数据是否完整"
+                ),
+                "data": {
+                    "warehouse_options": warehouse_options,
+                    "plan": {},
+                },
+            }
+
+        hint_msg = (
+            f"查询区间与快照发货日已取交集：实际使用 {lo_s}～{hi_s} "
+            f"（快照内发货日范围为 {dmin.isoformat()}～{dmax.isoformat()}）"
+        )
+
     plan: Dict[str, Any] = {}
     for row in rows:
-        w_h = row[0]
-        c_n = row[1]
-        s_m = row[2]
-        d_day = row[3]
-        t_c = row[4]
+        w_h, c_n, s_m, d_day, t_c = _prediction_agg_row(row)
+        if w_h is None or c_n is None or s_m is None:
+            continue
         if hasattr(d_day, "strftime"):
             d_str = d_day.strftime("%Y-%m-%d")
         else:
@@ -601,7 +720,6 @@ def query_ai_purchase_quantity(
         plan.setdefault(w_h, {}).setdefault(c_n, {}).setdefault(s_m, {})[d_str] = int(t_c or 0)
 
     # 统一输出：每个「仓库→合同→冶炼厂」下，请求区间内每日均有键，无数据为 0
-    # sd/ed 已为 YYYY-MM-DD 字符串，勿对 str 调用 strftime（否则会 AttributeError → 500）
     date_keys = _date_range(sd, ed)
     for contracts in plan.values():
         for smelters in contracts.values():
@@ -613,7 +731,7 @@ def query_ai_purchase_quantity(
 
     return {
         "success": True,
-        "message": "",
+        "message": hint_msg,
         "data": {
             "warehouse_options": warehouse_options,
             "plan": plan,
