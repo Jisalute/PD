@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import io
 from datetime import date
 from typing import Optional
@@ -48,10 +49,29 @@ async def download_history_template() -> StreamingResponse:
     )
 
 
+@router.get("/template.csv")
+async def download_history_template_csv() -> StreamingResponse:
+    """与 xlsx 模板相同表头的 CSV（UTF-8 BOM，便于 Excel 直接打开）。"""
+    cols = list(HistoryService.REQUIRED_COLUMNS_CANONICAL.keys())
+    buf = io.StringIO()
+    csv.writer(buf).writerow(cols)
+    body = buf.getvalue().encode("utf-8-sig")
+    return StreamingResponse(
+        io.BytesIO(body),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="delivery_history_import_template.csv"; '
+                "filename*=UTF-8''%E9%80%81%E8%B4%A7%E5%8E%86%E5%8F%B2%E5%AF%BC%E5%85%A5%E6%A8%A1%E6%9D%BF.csv"
+            )
+        },
+    )
+
+
 @router.post("/import", response_model=HistoryImportResponse)
 async def import_history_excel(
     request: Request,
-    file: UploadFile = File(..., description="Excel 文件（.xlsx）"),
+    file: UploadFile = File(..., description="送货历史数据文件：.csv（推荐，纯文本）或 .xlsx"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: HistoryService = Depends(get_history_service_dep),
     actor: AuditActor = Depends(get_audit_actor),
@@ -69,6 +89,11 @@ async def import_history_excel(
         )
         return result
     except ValidationBusinessException as e:
+        logger.info(
+            "history import validation failed file=%s message=%s",
+            fn,
+            e.message,
+        )
         await write_audit_standalone(
             "history_import_failed",
             resource=fn,
