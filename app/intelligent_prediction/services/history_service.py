@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import zipfile
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -73,7 +74,7 @@ class HistoryService:
             missing = needed - cols
             extra = cols - needed
             raise ValidationBusinessException(
-                "Excel 表头不符合要求",
+                "表头不符合要求（须与模板一致）",
                 details={
                     "required": sorted(needed),
                     "missing": sorted(missing),
@@ -110,18 +111,79 @@ class HistoryService:
         except InvalidOperation:
             return None, f"non_numeric_weight:{s[:80]}"
 
+    _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+    def _read_csv_dataframe(self, file_bytes: bytes, filename: str) -> pd.DataFrame:
+        """读取 CSV（UTF-8 / UTF-8-BOM / GBK / GB18030），自动识别逗号或制表符分隔。"""
+        text: str | None = None
+        last_dec_err: Exception | None = None
+        for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
+            try:
+                text = file_bytes.decode(enc)
+                break
+            except UnicodeDecodeError as e:
+                last_dec_err = e
+        if text is None:
+            raise ValidationBusinessException(
+                "CSV 无法按 UTF-8 或 GBK 解码，请另存为 UTF-8（带 BOM 亦可）后重试。"
+            ) from last_dec_err
+        try:
+            return pd.read_csv(
+                io.StringIO(text),
+                sep=None,
+                engine="python",
+                dtype=object,
+                skipinitialspace=True,
+            )
+        except Exception as e:
+            logger.warning("history csv parse failed name=%s: %s", filename or "-", e)
+            raise ValidationBusinessException(f"无法解析 CSV（请检查分隔符与表头）：{e}") from e
+
+    def _read_xlsx_dataframe(self, file_bytes: bytes, filename: str) -> pd.DataFrame:
+        """读取 .xlsx（OOXML zip，需 openpyxl）。"""
+        if len(file_bytes) < 4 or file_bytes[:2] != b"PK":
+            raise ValidationBusinessException(
+                "该文件不是有效的 .xlsx（zip 包）。可改用 CSV：从 Excel「另存为 CSV UTF-8」或使用接口提供的 CSV 模板。"
+            )
+        try:
+            return pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
+        except zipfile.BadZipFile:
+            logger.warning(
+                "history xlsx import: invalid zip name=%s size=%s",
+                filename or "-",
+                len(file_bytes),
+            )
+            raise ValidationBusinessException(
+                "无法解析 .xlsx（文件损坏或非 Excel 工作簿）。请另存为新 .xlsx 或导出 CSV 后上传。"
+            ) from None
+        except Exception as e:
+            logger.exception("xlsx read failed name=%s", filename or "-")
+            raise ValidationBusinessException(f"无法读取 .xlsx：{e}") from e
+
+    def _read_import_dataframe(self, file_bytes: bytes, filename: str) -> pd.DataFrame:
+        """按扩展名与内容选择 CSV 或 xlsx；无扩展名时 zip 头走 xlsx，否则按 CSV 解析。"""
+        fn = (filename or "").strip().lower()
+        if not file_bytes:
+            raise ValidationBusinessException("上传文件为空，请选择 .csv 或 .xlsx 文件")
+        if len(file_bytes) >= len(self._OLE2_MAGIC) and file_bytes[: len(self._OLE2_MAGIC)] == self._OLE2_MAGIC:
+            raise ValidationBusinessException(
+                "检测到旧版 .xls，请另存为 .xlsx，或在 Excel 中「另存为 CSV UTF-8」后上传 .csv。"
+            )
+        if fn.endswith(".csv"):
+            return self._read_csv_dataframe(file_bytes, filename)
+        if fn.endswith(".xlsx"):
+            return self._read_xlsx_dataframe(file_bytes, filename)
+        if file_bytes[:2] == b"PK":
+            return self._read_xlsx_dataframe(file_bytes, filename)
+        return self._read_csv_dataframe(file_bytes, filename)
+
     async def import_excel(
         self,
         session: AsyncSession,
         file_bytes: bytes,
         filename: str,
     ) -> HistoryImportResponse:
-        _ = filename
-        try:
-            df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
-        except Exception as e:
-            logger.exception("excel read failed")
-            raise ValidationBusinessException(f"无法读取 Excel：{e}") from e
+        df = self._read_import_dataframe(file_bytes, filename)
 
         df = self._normalize_columns(df)
         self._validate_headers(df)
