@@ -47,12 +47,16 @@ python database_setup.py
 
 ### 5) 运行应用
 
+**务必通过 `uv run` 调用**，否则会使用系统 PATH 里自带的 `uvicorn`（例如 Conda 的 Python 3.9），与 `uv sync` 安装的项目依赖（`.venv`）不一致，易出现 `ModuleNotFoundError: aiohttp` 等错误。
+
 ```bash
-# 开发环境（热重载）
+# 开发环境（热重载，推荐）
 uv run main.py
 
-# 或
-uvicorn main:app --reload --host 0.0.0.0 --port 8007
+# 或（等价，显式指定 uvicorn）
+uv run uvicorn main:app --reload --host 0.0.0.0 --port 8007
+
+# Windows 也可双击/执行项目根目录 start_server.ps1
 ```
 
 实际端口以环境变量 `PORT` 为准（未设置时默认为 **8007**）。

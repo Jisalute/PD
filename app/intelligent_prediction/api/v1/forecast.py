@@ -58,16 +58,21 @@ def _prd_query(
     )
 
 
-@router.get("/prd/chart", response_model=PrdForecastChartResponse)
+@router.get(
+    "/图表",
+    response_model=PrdForecastChartResponse,
+    summary="送货量预测图表数据",
+    description="按日期区间与筛选条件返回汇总曲线及按区域经理拆分的序列。",
+)
 async def prd_forecast_chart(
     date_from: date | None = Query(None, description="预测区间起点，默认当天"),
     date_to: date | None = Query(None, description="预测区间终点，默认当天+14"),
-    regional_manager: str | None = Query(None),
-    regional_managers: list[str] = Query(default=[]),
-    warehouse: str | None = Query(None),
-    warehouses: list[str] = Query(default=[]),
-    product_variety: str | None = Query(None),
-    product_varieties: list[str] = Query(default=[]),
+    regional_manager: str | None = Query(None, description="区域经理（单值，兼容旧参数）"),
+    regional_managers: list[str] = Query(default=[], description="区域经理（多值）"),
+    warehouse: str | None = Query(None, description="仓库（单值）"),
+    warehouses: list[str] = Query(default=[], description="仓库（多值）"),
+    product_variety: str | None = Query(None, description="品种（单值）"),
+    product_varieties: list[str] = Query(default=[], description="品种（多值）"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: PrdForecastService = Depends(get_prd_forecast_service),
 ) -> PrdForecastChartResponse:
@@ -92,18 +97,23 @@ async def prd_forecast_chart(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@router.get("/prd/detail", response_model=PrdForecastDetailResponse)
+@router.get(
+    "/明细",
+    response_model=PrdForecastDetailResponse,
+    summary="送货量预测明细分页",
+    description="返回规则模型计算的逐日、逐仓、逐品种预测明细。",
+)
 async def prd_forecast_detail(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
-    date_from: date | None = Query(None),
-    date_to: date | None = Query(None),
-    regional_manager: str | None = Query(None),
-    regional_managers: list[str] = Query(default=[]),
-    warehouse: str | None = Query(None),
-    warehouses: list[str] = Query(default=[]),
-    product_variety: str | None = Query(None),
-    product_varieties: list[str] = Query(default=[]),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(50, ge=1, le=500, description="每页条数"),
+    date_from: date | None = Query(None, description="预测区间起点"),
+    date_to: date | None = Query(None, description="预测区间终点"),
+    regional_manager: str | None = Query(None, description="区域经理（单值）"),
+    regional_managers: list[str] = Query(default=[], description="区域经理（多值）"),
+    warehouse: str | None = Query(None, description="仓库（单值）"),
+    warehouses: list[str] = Query(default=[], description="仓库（多值）"),
+    product_variety: str | None = Query(None, description="品种（单值）"),
+    product_varieties: list[str] = Query(default=[], description="品种（多值）"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: PrdForecastService = Depends(get_prd_forecast_service),
 ) -> PrdForecastDetailResponse:
@@ -128,16 +138,20 @@ async def prd_forecast_detail(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@router.get("/prd/export")
+@router.get(
+    "/导出",
+    summary="导出送货量预测 Excel",
+    description="按当前筛选条件导出全部明细为 xlsx 流。",
+)
 async def prd_forecast_export(
-    date_from: date | None = Query(None),
-    date_to: date | None = Query(None),
-    regional_manager: str | None = Query(None),
-    regional_managers: list[str] = Query(default=[]),
-    warehouse: str | None = Query(None),
-    warehouses: list[str] = Query(default=[]),
-    product_variety: str | None = Query(None),
-    product_varieties: list[str] = Query(default=[]),
+    date_from: date | None = Query(None, description="预测区间起点"),
+    date_to: date | None = Query(None, description="预测区间终点"),
+    regional_manager: str | None = Query(None, description="区域经理（单值）"),
+    regional_managers: list[str] = Query(default=[], description="区域经理（多值）"),
+    warehouse: str | None = Query(None, description="仓库（单值）"),
+    warehouses: list[str] = Query(default=[], description="仓库（多值）"),
+    product_variety: str | None = Query(None, description="品种（单值）"),
+    product_varieties: list[str] = Query(default=[], description="品种（多值）"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: PrdForecastService = Depends(get_prd_forecast_service),
     actor: AuditActor = Depends(get_audit_actor),
