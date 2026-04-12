@@ -21,6 +21,7 @@ from app.intelligent_prediction.schemas.history import (
     HistoryImportResponse,
     HistoryListResponse,
     HistoryQueryParams,
+    HistoryTemplateFieldsResponse,
 )
 from app.intelligent_prediction.services.audit_service import append_audit, write_audit_standalone
 from app.intelligent_prediction.services.history_service import HistoryService
@@ -30,13 +31,26 @@ router = APIRouter()
 
 
 @router.get(
+    "/模板/fields",
+    response_model=HistoryTemplateFieldsResponse,
+    summary="导入模板列定义（JSON）",
+    description="返回模板表头顺序及与内部字段映射，含「冶炼厂」；与 GET /送货历史/模板 下载的 xlsx 表头一致。",
+)
+async def history_template_fields() -> HistoryTemplateFieldsResponse:
+    return HistoryTemplateFieldsResponse(
+        headers=HistoryService.import_template_headers(),
+        header_to_field=dict(HistoryService.REQUIRED_COLUMNS_CANONICAL),
+    )
+
+
+@router.get(
     "/模板",
     summary="下载送货历史导入模板",
-    description="返回标准 xlsx 模板，表头与 PRD 约定一致。",
+    description="返回标准 xlsx 模板；表头含：大区经理、冶炼厂、仓库、送货日期、品种、重量。",
 )
 async def download_history_template() -> StreamingResponse:
     """标准导入模板（表头与 PRD 一致）。"""
-    cols = list(HistoryService.REQUIRED_COLUMNS_CANONICAL.keys())
+    cols = HistoryService.import_template_headers()
     df = pd.DataFrame(columns=cols)
     buf = io.BytesIO()
     df.to_excel(buf, index=False, engine="openpyxl")
@@ -62,7 +76,7 @@ async def download_history_template() -> StreamingResponse:
 @router.get("/template.csv")
 async def download_history_template_csv() -> StreamingResponse:
     """与 xlsx 模板相同表头的 CSV（UTF-8 BOM，便于 Excel 直接打开）。"""
-    cols = list(HistoryService.REQUIRED_COLUMNS_CANONICAL.keys())
+    cols = HistoryService.import_template_headers()
     buf = io.StringIO()
     csv.writer(buf).writerow(cols)
     body = buf.getvalue().encode("utf-8-sig")
@@ -128,13 +142,15 @@ async def import_history_excel(
     "",
     response_model=HistoryListResponse,
     summary="分页查询送货历史",
-    description="支持按区域经理、仓库、品种、送货日期区间筛选。",
+    description="支持按区域经理、冶炼厂、仓库、品种、送货日期区间筛选。",
 )
 async def list_history(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=200, description="每页条数"),
     regional_manager: Optional[str] = Query(None, description="区域经理（单值）"),
     regional_managers: list[str] = Query(default=[], description="区域经理（多值）"),
+    smelter: Optional[str] = Query(None, description="冶炼厂（单值）"),
+    smelters: list[str] = Query(default=[], description="冶炼厂（多值）"),
     warehouse: Optional[str] = Query(None, description="仓库（单值）"),
     warehouses: list[str] = Query(default=[], description="仓库（多值）"),
     product_variety: Optional[str] = Query(None, description="品种（单值）"),
@@ -151,6 +167,8 @@ async def list_history(
         warehouse=warehouse,
         product_variety=product_variety,
         regional_managers=regional_managers,
+        smelter=smelter,
+        smelters=smelters,
         warehouses=warehouses,
         product_varieties=product_varieties,
         date_from=date_from,

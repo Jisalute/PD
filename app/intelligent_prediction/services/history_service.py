@@ -6,7 +6,7 @@ import io
 import zipfile
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 from sqlalchemy import delete, func, select
@@ -29,19 +29,30 @@ logger = get_logger(__name__)
 class HistoryService:
     """历史记录业务逻辑。"""
 
-    REQUIRED_COLUMNS_CANONICAL: dict[str, str] = {
-        "大区经理": "regional_manager",
-        "仓库": "warehouse",
-        "送货日期": "delivery_date",
-        "品种": "product_variety",
-        "重量": "weight",
-    }
+    # 单一来源：下载模板表头顺序与导入必填列一致（含「冶炼厂」）
+    _IMPORT_COLUMN_PAIRS: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("大区经理", "regional_manager"),
+        ("冶炼厂", "smelter"),
+        ("仓库", "warehouse"),
+        ("送货日期", "delivery_date"),
+        ("品种", "product_variety"),
+        ("重量", "weight"),
+    )
+    REQUIRED_COLUMNS_CANONICAL: dict[str, str] = dict(_IMPORT_COLUMN_PAIRS)
+
+    @classmethod
+    def import_template_headers(cls) -> list[str]:
+        """与 GET /送货历史/模板 生成的 xlsx/csv 表头顺序一致。"""
+        return [cn for cn, _ in cls._IMPORT_COLUMN_PAIRS]
 
     ALIAS_TO_CANONICAL: dict[str, str] = {
         "大区经理": "大区经理",
         "大區經理": "大区经理",
         "Regional Manager": "大区经理",
         "regional_manager": "大区经理",
+        "冶炼厂": "冶炼厂",
+        "Smelter": "冶炼厂",
+        "smelter": "冶炼厂",
         "仓库": "仓库",
         "倉庫": "仓库",
         "Warehouse": "仓库",
@@ -194,6 +205,7 @@ class HistoryService:
         for idx, row in df.iterrows():
             excel_row = int(idx) + 2
             rm = row.get("大区经理")
+            sm = row.get("冶炼厂")
             wh = row.get("仓库")
             dv = row.get("送货日期")
             variety = row.get("品种")
@@ -206,6 +218,11 @@ class HistoryService:
                 row_errors.append("仓库必填")
             if variety is None or str(variety).strip() == "":
                 row_errors.append("品种必填")
+            sm_str: str | None = None
+            if sm is not None and str(sm).strip() != "":
+                sm_str = str(sm).strip()
+                if len(sm_str) > 100:
+                    row_errors.append("冶炼厂长度不可超过100字符")
 
             d, de = self._parse_date_cell(dv)
             if de:
@@ -231,6 +248,7 @@ class HistoryService:
             to_insert.append(
                 DeliveryRecord(
                     regional_manager=str(rm).strip(),
+                    smelter=sm_str,
                     warehouse=str(wh).strip(),
                     delivery_date=d,
                     product_variety=str(variety).strip(),
@@ -279,6 +297,14 @@ class HistoryService:
         if vars_:
             stmt = stmt.where(DeliveryRecord.product_variety.in_(vars_))
             count_stmt = count_stmt.where(DeliveryRecord.product_variety.in_(vars_))
+
+        sms = list(q.smelters)
+        if not sms and q.smelter:
+            sms = [q.smelter]
+        if sms:
+            stmt = stmt.where(DeliveryRecord.smelter.in_(sms))
+            count_stmt = count_stmt.where(DeliveryRecord.smelter.in_(sms))
+
         if q.date_from:
             stmt = stmt.where(DeliveryRecord.delivery_date >= q.date_from)
             count_stmt = count_stmt.where(DeliveryRecord.delivery_date >= q.date_from)

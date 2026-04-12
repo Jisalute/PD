@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -53,15 +53,19 @@ class PredictionService:
         session: AsyncSession,
         warehouse: str,
         variety: str,
+        smelter: Optional[str] = None,
         limit: int = 120,
     ) -> list[PredictionHistoryPoint]:
         """从数据库加载最近历史记录。"""
+        conds = [
+            DeliveryRecord.warehouse == warehouse,
+            DeliveryRecord.product_variety == variety,
+        ]
+        if smelter:
+            conds.append(DeliveryRecord.smelter == smelter)
         stmt = (
             select(DeliveryRecord)
-            .where(
-                DeliveryRecord.warehouse == warehouse,
-                DeliveryRecord.product_variety == variety,
-            )
+            .where(and_(*conds))
             .order_by(DeliveryRecord.delivery_date.desc())
             .limit(limit)
         )
@@ -81,7 +85,12 @@ class PredictionService:
         """若请求未带 history，则由数据库补齐。"""
         if req.history:
             return req
-        hist = await self._load_history_from_db(session, req.warehouse, req.product_variety)
+        hist = await self._load_history_from_db(
+            session,
+            req.warehouse,
+            req.product_variety,
+            smelter=req.smelter,
+        )
         return req.model_copy(update={"history": hist})
 
     def _post_process_items(
@@ -209,8 +218,9 @@ class PredictionService:
         req = await self._ensure_request_history(session, req)
         start = req.prediction_start_date or self._utc_today()
         logger.info(
-            "prediction_request warehouse=%s variety=%s horizon=%s hist_count=%s client_request_id=%s",
+            "prediction_request warehouse=%s smelter=%s variety=%s horizon=%s hist_count=%s client_request_id=%s",
             req.warehouse,
+            req.smelter,
             req.product_variety,
             req.horizon_days,
             len(req.history),
@@ -218,7 +228,8 @@ class PredictionService:
         )
         stats = self._prompt.analyze_history(req.history)
         fp = self._cache.stats_fingerprint(stats)
-        mem_key = f"prompt:{req.warehouse}:{req.product_variety}:{fp}"
+        sm_part = req.smelter or ""
+        mem_key = f"prompt:{req.warehouse}:{sm_part}:{req.product_variety}:{fp}"
         cached_prompt = await self._cache.memory.get(mem_key)
         if cached_prompt is None:
             system, user = self._prompt.build_messages(req, stats, start)
@@ -231,6 +242,7 @@ class PredictionService:
             req.product_variety,
             req.horizon_days,
             fp,
+            smelter=req.smelter,
         )
         if req.use_cache:
             cached = await self._cache.redis.get_json(redis_key)

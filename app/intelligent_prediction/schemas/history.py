@@ -16,6 +16,7 @@ class DeliveryRecordRead(BaseModel):
 
     id: int
     regional_manager: str
+    smelter: Optional[str] = None
     warehouse: str
     delivery_date: date
     product_variety: str
@@ -48,6 +49,13 @@ class HistoryImportResponse(BaseModel):
     errors: list[HistoryImportRowError]
 
 
+class HistoryTemplateFieldsResponse(BaseModel):
+    """导入模板列说明（与下载的 xlsx/csv 表头一致）。"""
+
+    headers: list[str] = Field(..., description="表头中文名，顺序与模板文件一致")
+    header_to_field: dict[str, str] = Field(..., description="表头到内部字段名（如 smelter）")
+
+
 class HistoryBatchDeleteRequest(BaseModel):
     """批量删除请求。"""
 
@@ -71,10 +79,12 @@ class HistoryQueryParams(BaseModel):
     regional_managers: list[str] = Field(default_factory=list)
     warehouses: list[str] = Field(default_factory=list)
     product_varieties: list[str] = Field(default_factory=list)
+    smelter: Optional[str] = None
+    smelters: list[str] = Field(default_factory=list)
     date_from: Optional[date] = None
     date_to: Optional[date] = None
 
-    @field_validator("regional_manager", "warehouse", "product_variety", mode="before")
+    @field_validator("regional_manager", "warehouse", "product_variety", "smelter", mode="before")
     @classmethod
     def empty_to_none(cls, v: Any) -> Any:
         """空字符串视为未筛选。"""
@@ -84,7 +94,7 @@ class HistoryQueryParams(BaseModel):
             return None
         return v.strip() if isinstance(v, str) else v
 
-    @field_validator("regional_managers", "warehouses", "product_varieties", mode="before")
+    @field_validator("regional_managers", "warehouses", "product_varieties", "smelters", mode="before")
     @classmethod
     def normalize_str_lists(cls, v: Any) -> list[str]:
         if v is None:

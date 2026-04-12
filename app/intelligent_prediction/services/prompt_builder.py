@@ -69,6 +69,7 @@ class PromptBuilder:
         )
         return (
             f"仓库: {req.warehouse}\n"
+            f"冶炼厂: {req.smelter or '未指定（历史含全部冶炼厂）'}\n"
             f"品种: {req.product_variety}\n"
             f"大区经理: {req.regional_manager or '未提供'}\n"
             f"需要预测的目标日期（依次）: {date_lines}\n"

@@ -651,6 +651,7 @@ TABLE_STATEMENTS = [
 	CREATE TABLE IF NOT EXISTS pd_ip_delivery_records (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
 		regional_manager VARCHAR(255) NOT NULL COMMENT '大区经理',
+		smelter VARCHAR(100) DEFAULT NULL COMMENT '冶炼厂',
 		warehouse VARCHAR(255) NOT NULL COMMENT '仓库',
 		delivery_date DATE NOT NULL COMMENT '送货日期',
 		product_variety VARCHAR(255) NOT NULL COMMENT '品种',
@@ -660,7 +661,8 @@ TABLE_STATEMENTS = [
 		INDEX idx_ip_delivery_date (delivery_date),
 		INDEX idx_ip_warehouse (warehouse),
 		INDEX idx_ip_product_variety (product_variety),
-		INDEX idx_ip_regional_manager (regional_manager)
+		INDEX idx_ip_regional_manager (regional_manager),
+		INDEX idx_ip_smelter (smelter)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='智能预测-送货历史';
 	""",
 	"""
@@ -1164,6 +1166,35 @@ def migrate_delivery_status_to_audit():
 		connection.close()
 
 
+def ensure_pd_ip_delivery_records_smelter_column():
+	"""旧库为智能预测送货历史表补全 smelter（冶炼厂）列。"""
+	config = get_mysql_config()
+	connection = pymysql.connect(**config)
+	try:
+		with connection.cursor() as cursor:
+			cursor.execute("SHOW TABLES LIKE 'pd_ip_delivery_records'")
+			if cursor.fetchone() is None:
+				return
+			cursor.execute("SHOW COLUMNS FROM pd_ip_delivery_records LIKE 'smelter'")
+			if cursor.fetchone() is not None:
+				return
+			cursor.execute("""
+				ALTER TABLE pd_ip_delivery_records
+				ADD COLUMN smelter VARCHAR(100) DEFAULT NULL COMMENT '冶炼厂'
+				AFTER regional_manager
+			""")
+			try:
+				cursor.execute(
+					"ALTER TABLE pd_ip_delivery_records ADD INDEX idx_ip_smelter (smelter)"
+				)
+			except Exception:
+				pass
+			print("pd_ip_delivery_records 已添加 smelter（冶炼厂）列")
+		connection.commit()
+	finally:
+		connection.close()
+
+
 def create_tables() -> None:
 	# 第1步：先创建数据库（如果不存在）
 	create_database_if_not_exists()
@@ -1183,6 +1214,7 @@ def create_tables() -> None:
 		ensure_pd_delivery_plans_tonnage_column()
 		ensure_pd_warehouses_regional_manager_column()
 		ensure_pd_allocation_predictions_regional_manager_column()
+		ensure_pd_ip_delivery_records_smelter_column()
 		migrate_delivery_status_to_audit()
 		try:
 			ensure_tl_quote_details_price_field_sources_column()

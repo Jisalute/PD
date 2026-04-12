@@ -11,6 +11,12 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+def _snake_to_camel(name: str) -> str:
+    """JSON 驼峰别名（与前端 Vue/TS 常见命名一致）。"""
+    parts = name.split("_")
+    return parts[0] + "".join(p.capitalize() for p in parts[1:] if p)
+
+
 class ConfidenceLevel(str, Enum):
     """信心等级枚举。"""
 
@@ -56,6 +62,8 @@ class PredictionItem(BaseModel):
 class PredictionHistoryPoint(BaseModel):
     """用于提示的历史点。"""
 
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_snake_to_camel)
+
     delivery_date: date
     weight: Decimal = Field(..., ge=0)
 
@@ -63,9 +71,18 @@ class PredictionHistoryPoint(BaseModel):
 class PredictionRequest(BaseModel):
     """同步或批量预测请求。"""
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+        populate_by_name=True,
+        alias_generator=_snake_to_camel,
+    )
 
     regional_manager: Optional[str] = Field(default=None, max_length=255)
+    smelter: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="冶炼厂（可选；填写时从数据库加载历史将按冶炼厂筛选）",
+    )
     warehouse: str = Field(..., min_length=1, max_length=255, description="仓库")
     product_variety: str = Field(..., min_length=1, max_length=255, description="品种")
     horizon_days: int = Field(default=7, ge=1, le=90, description="预测天数")
@@ -86,6 +103,14 @@ class PredictionRequest(BaseModel):
         """去除首尾空白。"""
         return v.strip()
 
+    @field_validator("smelter", mode="before")
+    @classmethod
+    def smelter_optional_strip(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
     @model_validator(mode="after")
     def check_history_or_db(self) -> PredictionRequest:
         """历史可为空（由服务补齐）；horizon 必须合理。"""
@@ -96,6 +121,8 @@ class PredictionRequest(BaseModel):
 
 class BatchPredictionRequest(BaseModel):
     """多笔预测请求（批量）。"""
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=_snake_to_camel)
 
     items: list[PredictionRequest] = Field(..., min_length=1, max_length=500)
 

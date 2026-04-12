@@ -23,6 +23,7 @@ class DeliveryRecord(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     regional_manager: Mapped[str] = mapped_column(String(255), index=True)
+    smelter: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
     warehouse: Mapped[str] = mapped_column(String(255), index=True)
     delivery_date: Mapped[date] = mapped_column(Date, index=True)
     product_variety: Mapped[str] = mapped_column(String(255), index=True)

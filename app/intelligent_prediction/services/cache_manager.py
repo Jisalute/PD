@@ -9,6 +9,7 @@ import time
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
+import redis.exceptions as redis_exc
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -62,6 +63,16 @@ class RedisCache:
             await self._client.aclose()
             self._client = None
 
+    async def _reset_client(self) -> None:
+        """连接异常后丢弃客户端，便于下次重试。"""
+        if self._client is None:
+            return
+        try:
+            await self._client.aclose()
+        except Exception:
+            pass
+        self._client = None
+
     @property
     def raw(self) -> aioredis.Redis:
         """取得底层客户端（需先 connect）。"""
@@ -71,8 +82,13 @@ class RedisCache:
 
     async def get_json(self, key: str) -> Any | None:
         """GET 並 json.loads。"""
-        await self.connect()
-        raw = await self.raw.get(key)
+        try:
+            await self.connect()
+            raw = await self.raw.get(key)
+        except redis_exc.RedisError as e:
+            logger.warning("Redis 不可用，跳过预测结果读缓存：%s", e)
+            await self._reset_client()
+            return None
         if raw is None:
             return None
         try:
@@ -83,8 +99,12 @@ class RedisCache:
 
     async def set_json(self, key: str, value: Any, ttl_seconds: int) -> None:
         """SET JSON 字串並 EX。"""
-        await self.connect()
-        await self.raw.set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl_seconds)
+        try:
+            await self.connect()
+            await self.raw.set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl_seconds)
+        except redis_exc.RedisError as e:
+            logger.warning("Redis 不可用，跳过预测结果写缓存：%s", e)
+            await self._reset_client()
 
 
 class CacheManager:
@@ -100,9 +120,11 @@ class CacheManager:
         variety: str,
         horizon: int,
         stats_fingerprint: str,
+        smelter: str | None = None,
     ) -> str:
         """生成预测结果 Redis 键。"""
-        base = f"{warehouse}|{variety}|{horizon}|{stats_fingerprint}"
+        sm = smelter or ""
+        base = f"{warehouse}|{sm}|{variety}|{horizon}|{stats_fingerprint}"
         h = hashlib.sha256(base.encode("utf-8")).hexdigest()[:48]
         return f"pred:v1:{h}"
 
