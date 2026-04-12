@@ -127,9 +127,9 @@ class PredictionResultSchema(BaseModel):
 class AsyncPredictionAccepted(BaseModel):
     """异步预测已接受。"""
 
-    task_id: str = Field(..., description="Celery task id")
-    predict_id: uuid.UUID = Field(..., description="批次 UUID")
-    status: str = Field(default="pending")
+    task_id: str = Field(..., description="Celery 任务编号")
+    predict_id: uuid.UUID = Field(..., description="预测批次 UUID")
+    status: str = Field(default="pending", description="批次状态，如 pending")
 
 
 class BatchStatusResponse(BaseModel):

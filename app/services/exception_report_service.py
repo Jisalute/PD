@@ -11,8 +11,71 @@ logger = logging.getLogger(__name__)
 STATUS_CHOICES = ("待处理", "已处理")
 
 
+def _apply_exception_report_aliases(data: Dict[str, Any]) -> None:
+    """把前端常用字段名合并到入库字段（就地修改）。"""
+    vn = str(data.get("vehicle_no") or "").strip()
+    if not vn:
+        pn = str(data.get("plate_no") or "").strip()
+        if pn:
+            data["vehicle_no"] = pn
+    desc = data.get("description")
+    if desc is None or (isinstance(desc, str) and not desc.strip()):
+        ad = data.get("abnormal_desc")
+        if ad is not None:
+            s = str(ad).strip()
+            data["description"] = s or None
+
+
 class ExceptionReportService:
     """异常上报管理服务"""
+
+    def _resolve_exception_type(
+        self,
+        exception_type_id: Any,
+        abnormal_type: Optional[str],
+    ) -> tuple[Optional[int], Optional[str], Optional[str]]:
+        """返回 (exception_type_id, exception_type_name, error_message)。"""
+        tid: Optional[int] = None
+        if exception_type_id is not None and str(exception_type_id).strip() != "":
+            try:
+                tid = int(exception_type_id)
+            except (TypeError, ValueError):
+                return None, None, "异常类型 ID 格式不正确"
+
+        name_hint = (abnormal_type or "").strip() or None
+        if tid is not None:
+            try:
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT type_name FROM pd_exception_types WHERE id = %s",
+                            (tid,),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            return tid, row["type_name"], None
+                        return None, None, f"异常类型 ID {tid} 不存在"
+            except Exception as e:
+                logger.error(f"查询异常类型失败: {e}")
+                return None, None, str(e)
+
+        if name_hint:
+            try:
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT id, type_name FROM pd_exception_types WHERE type_name = %s",
+                            (name_hint,),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            return int(row["id"]), row["type_name"], None
+                        return None, name_hint, None
+            except Exception as e:
+                logger.error(f"按名称查询异常类型失败: {e}")
+                return None, None, str(e)
+
+        return None, None, None
 
     def list_reports(
         self,
@@ -133,6 +196,9 @@ class ExceptionReportService:
 
     def create_report(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """新增异常上报"""
+        data = dict(data)
+        _apply_exception_report_aliases(data)
+
         status = (data.get("status") or "待处理").strip()
         if status not in STATUS_CHOICES:
             return {"success": False, "error": f"异常状态必须是 {'/'.join(STATUS_CHOICES)} 之一"}
@@ -140,28 +206,21 @@ class ExceptionReportService:
         driver_name = (data.get("driver_name") or "").strip() or None
         vehicle_no = (data.get("vehicle_no") or "").strip() or None
         phone = (data.get("phone") or "").strip() or None
-        exception_type_id = data.get("exception_type_id")
         description = (data.get("description") or "").strip() or None
         reporter = (data.get("reporter") or "").strip() or None
         reported_at = data.get("reported_at")  # 可选，不传则用当前时间
 
-        exception_type_name = None
-        if exception_type_id:
-            try:
-                with get_conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT type_name FROM pd_exception_types WHERE id = %s",
-                            (exception_type_id,),
-                        )
-                        row = cur.fetchone()
-                        if row:
-                            exception_type_name = row["type_name"]
-                        else:
-                            return {"success": False, "error": f"异常类型 ID {exception_type_id} 不存在"}
-            except Exception as e:
-                logger.error(f"查询异常类型失败: {e}")
-                return {"success": False, "error": str(e)}
+        et_id_raw = data.get("exception_type_id")
+        abnormal_type = (data.get("abnormal_type") or "").strip() or None
+        if et_id_raw is None and abnormal_type is None:
+            exception_type_id: Optional[int] = None
+            exception_type_name = None
+        else:
+            exception_type_id, exception_type_name, err = self._resolve_exception_type(
+                et_id_raw, abnormal_type
+            )
+            if err:
+                return {"success": False, "error": err}
 
         try:
             with get_conn() as conn:
@@ -221,6 +280,9 @@ class ExceptionReportService:
 
     def update_report(self, report_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
         """修改异常上报"""
+        data = dict(data)
+        _apply_exception_report_aliases(data)
+
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -251,31 +313,31 @@ class ExceptionReportService:
                     if "driver_name" in data:
                         update_parts.append("driver_name = %s")
                         params.append((data["driver_name"] or "").strip() or None)
-                    if "vehicle_no" in data:
+                    if "vehicle_no" in data or "plate_no" in data:
                         update_parts.append("vehicle_no = %s")
-                        params.append((data["vehicle_no"] or "").strip() or None)
+                        params.append((data.get("vehicle_no") or "").strip() or None)
                     if "phone" in data:
                         update_parts.append("phone = %s")
                         params.append((data["phone"] or "").strip() or None)
-                    if "exception_type_id" in data:
-                        exception_type_id = data["exception_type_id"]
-                        exception_type_name = None
-                        if exception_type_id:
-                            cur.execute(
-                                "SELECT type_name FROM pd_exception_types WHERE id = %s",
-                                (exception_type_id,),
+                    if "exception_type_id" in data or "abnormal_type" in data:
+                        et_id_raw = data.get("exception_type_id")
+                        abnormal_type = (data.get("abnormal_type") or "").strip() or None
+                        if et_id_raw is None and not abnormal_type:
+                            exception_type_id = None
+                            exception_type_name = None
+                        else:
+                            exception_type_id, exception_type_name, err = self._resolve_exception_type(
+                                et_id_raw, abnormal_type
                             )
-                            row = cur.fetchone()
-                            if not row:
-                                return {"success": False, "error": f"异常类型 ID {exception_type_id} 不存在"}
-                            exception_type_name = row["type_name"]
+                            if err:
+                                return {"success": False, "error": err}
                         update_parts.append("exception_type_id = %s")
                         params.append(exception_type_id)
                         update_parts.append("exception_type_name = %s")
                         params.append(exception_type_name)
-                    if "description" in data:
+                    if "description" in data or "abnormal_desc" in data:
                         update_parts.append("description = %s")
-                        params.append((data["description"] or "").strip() or None)
+                        params.append((data.get("description") or "").strip() or None)
                     if "reporter" in data:
                         update_parts.append("reporter = %s")
                         params.append((data["reporter"] or "").strip() or None)

@@ -19,9 +19,23 @@ class ExceptionReportCreateRequest(BaseModel):
     status: str = Field("待处理", description="异常状态：待处理/已处理")
     driver_name: Optional[str] = Field(None, description="司机姓名", max_length=64)
     vehicle_no: Optional[str] = Field(None, description="车牌号", max_length=32)
+    plate_no: Optional[str] = Field(
+        None,
+        description="车牌号（与 vehicle_no 二选一，常见于司机端/小程序上报）",
+        max_length=32,
+    )
     phone: Optional[str] = Field(None, description="电话", max_length=32)
     exception_type_id: Optional[int] = Field(None, description="异常类型ID（下拉选择）")
     description: Optional[str] = Field(None, description="异常说明")
+    abnormal_desc: Optional[str] = Field(
+        None,
+        description="异常说明（与 description 二选一，前端常用字段名）",
+    )
+    abnormal_type: Optional[str] = Field(
+        None,
+        description="异常类型名称（与 exception_type_id 二选一；将按名称匹配 pd_exception_types，未匹配则仅存名称）",
+        max_length=64,
+    )
     reporter: Optional[str] = Field(None, description="上报人", max_length=64)
     reported_at: Optional[str] = Field(None, description="上报时间（不填则用当前时间）")
 
@@ -30,9 +44,20 @@ class ExceptionReportUpdateRequest(BaseModel):
     status: Optional[str] = Field(None, description="异常状态：待处理/已处理")
     driver_name: Optional[str] = Field(None, description="司机姓名", max_length=64)
     vehicle_no: Optional[str] = Field(None, description="车牌号", max_length=32)
+    plate_no: Optional[str] = Field(
+        None,
+        description="车牌号（与 vehicle_no 二选一）",
+        max_length=32,
+    )
     phone: Optional[str] = Field(None, description="电话", max_length=32)
     exception_type_id: Optional[int] = Field(None, description="异常类型ID（下拉选择）")
     description: Optional[str] = Field(None, description="异常说明")
+    abnormal_desc: Optional[str] = Field(None, description="异常说明（与 description 二选一）")
+    abnormal_type: Optional[str] = Field(
+        None,
+        description="异常类型名称（与 exception_type_id 二选一）",
+        max_length=64,
+    )
     reporter: Optional[str] = Field(None, description="上报人", max_length=64)
     reported_at: Optional[str] = Field(None, description="上报时间")
 

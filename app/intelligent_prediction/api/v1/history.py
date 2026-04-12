@@ -29,7 +29,11 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-@router.get("/template")
+@router.get(
+    "/模板",
+    summary="下载送货历史导入模板",
+    description="返回标准 xlsx 模板，表头与 PRD 约定一致。",
+)
 async def download_history_template() -> StreamingResponse:
     """标准导入模板（表头与 PRD 一致）。"""
     cols = list(HistoryService.REQUIRED_COLUMNS_CANONICAL.keys())
@@ -49,6 +53,12 @@ async def download_history_template() -> StreamingResponse:
     )
 
 
+@router.post(
+    "/导入",
+    response_model=HistoryImportResponse,
+    summary="导入送货历史 Excel",
+    description="上传 xlsx，校验后批量写入送货历史表。",
+)
 @router.get("/template.csv")
 async def download_history_template_csv() -> StreamingResponse:
     """与 xlsx 模板相同表头的 CSV（UTF-8 BOM，便于 Excel 直接打开）。"""
@@ -114,18 +124,23 @@ async def import_history_excel(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@router.get("", response_model=HistoryListResponse)
+@router.get(
+    "",
+    response_model=HistoryListResponse,
+    summary="分页查询送货历史",
+    description="支持按区域经理、仓库、品种、送货日期区间筛选。",
+)
 async def list_history(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
-    regional_manager: Optional[str] = Query(None),
-    regional_managers: list[str] = Query(default=[]),
-    warehouse: Optional[str] = Query(None),
-    warehouses: list[str] = Query(default=[]),
-    product_variety: Optional[str] = Query(None),
-    product_varieties: list[str] = Query(default=[]),
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=200, description="每页条数"),
+    regional_manager: Optional[str] = Query(None, description="区域经理（单值）"),
+    regional_managers: list[str] = Query(default=[], description="区域经理（多值）"),
+    warehouse: Optional[str] = Query(None, description="仓库（单值）"),
+    warehouses: list[str] = Query(default=[], description="仓库（多值）"),
+    product_variety: Optional[str] = Query(None, description="品种（单值）"),
+    product_varieties: list[str] = Query(default=[], description="品种（多值）"),
+    date_from: Optional[date] = Query(None, description="送货日期起（含）"),
+    date_to: Optional[date] = Query(None, description="送货日期止（含）"),
     session: AsyncSession = Depends(get_prediction_db_session),
     svc: HistoryService = Depends(get_history_service_dep),
 ) -> HistoryListResponse:
@@ -150,7 +165,11 @@ async def list_history(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@router.delete("/batch")
+@router.delete(
+    "/批量删除",
+    summary="批量删除送货历史",
+    description="根据主键 id 列表批量删除记录。",
+)
 async def batch_delete_history(
     body: HistoryBatchDeleteRequest,
     session: AsyncSession = Depends(get_prediction_db_session),

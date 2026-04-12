@@ -30,7 +30,12 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-@router.post("", response_model=list[PredictionResultSchema])
+@router.post(
+    "",
+    response_model=list[PredictionResultSchema],
+    summary="同步批量预测",
+    description="调用大模型对多笔请求做预测，并将结果写入数据库。",
+)
 async def predict_sync(
     body: BatchPredictionRequest,
     session: AsyncSession = Depends(get_prediction_db_session),
@@ -48,7 +53,12 @@ async def predict_sync(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@router.post("/async", response_model=AsyncPredictionAccepted)
+@router.post(
+    "/异步",
+    response_model=AsyncPredictionAccepted,
+    summary="异步批量预测",
+    description="创建预测批次并入队 Celery，返回任务编号与批次编号。",
+)
 async def predict_async(
     body: BatchPredictionRequest,
     session: AsyncSession = Depends(get_prediction_db_session),
@@ -88,16 +98,21 @@ async def predict_async(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@router.get("/results", response_model=StoredPredictionResultListResponse)
+@router.get(
+    "/结果",
+    response_model=StoredPredictionResultListResponse,
+    summary="分页查询预测结果",
+    description="查询已落库的预测明细，支持按仓库、品种、区域经理、批次、目标日期筛选。",
+)
 async def list_stored_prediction_results(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=200),
+    page: int = Query(1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(20, ge=1, le=200, description="每页条数"),
     warehouse: str | None = Query(None, description="仓库（精确匹配）"),
     product_variety: str | None = Query(None, description="品种（精确匹配）"),
-    regional_manager: str | None = Query(None),
+    regional_manager: str | None = Query(None, description="区域经理（精确匹配）"),
     batch_id: uuid.UUID | None = Query(None, description="异步批次 UUID"),
-    target_date_from: date | None = Query(None),
-    target_date_to: date | None = Query(None),
+    target_date_from: date | None = Query(None, description="预测目标日期起（含）"),
+    target_date_to: date | None = Query(None, description="预测目标日期止（含）"),
     session: AsyncSession = Depends(get_prediction_db_session),
 ) -> StoredPredictionResultListResponse:
     """分页查询已写入数据库的预测明细（含同步预测 batch_id 为空）。"""
@@ -140,7 +155,12 @@ async def list_stored_prediction_results(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@router.get("/batch/{predict_id}", response_model=BatchStatusResponse)
+@router.get(
+    "/批次/{predict_id}",
+    response_model=BatchStatusResponse,
+    summary="查询异步批次状态",
+    description="根据批次 UUID 查询处理状态、结果条数、导出文件是否就绪等。",
+)
 async def get_batch_status(
     predict_id: uuid.UUID,
     session: AsyncSession = Depends(get_prediction_db_session),
@@ -150,7 +170,7 @@ async def get_batch_status(
     res = await session.execute(stmt)
     batch = res.scalar_one_or_none()
     if batch is None:
-        raise HTTPException(status_code=404, detail="batch_not_found")
+        raise HTTPException(status_code=404, detail="未找到该预测批次")
     cnt_stmt = select(func.count()).select_from(PredictionResultRow).where(
         PredictionResultRow.batch_id == predict_id_str
     )
@@ -169,7 +189,11 @@ async def get_batch_status(
     )
 
 
-@router.get("/batch/{predict_id}/download")
+@router.get(
+    "/批次/{predict_id}/下载",
+    summary="下载批次导出 Excel",
+    description="异步任务生成导出文件后，通过本接口下载对应 xlsx。",
+)
 async def download_batch_excel(
     predict_id: uuid.UUID,
     session: AsyncSession = Depends(get_prediction_db_session),
@@ -181,12 +205,12 @@ async def download_batch_excel(
     res = await session.execute(stmt)
     batch = res.scalar_one_or_none()
     if batch is None:
-        raise HTTPException(status_code=404, detail="batch_not_found")
+        raise HTTPException(status_code=404, detail="未找到该预测批次")
     path = batch.export_file_path
     if not path or not Path(path).is_file():
-        raise HTTPException(status_code=404, detail="export_not_ready")
+        raise HTTPException(status_code=404, detail="导出文件尚未生成或不存在")
     return FileResponse(
         path,
-        filename=f"prediction_{predict_id_str}.xlsx",
+        filename=f"预测导出_{predict_id_str}.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
