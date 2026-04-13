@@ -21,7 +21,7 @@ from app.core.logging import (
 
 setup_logging()
 
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -38,13 +38,16 @@ from app.core.config import settings
 from app.api.v1.user.routes import register_pd_auth_routes
 from core.auth import get_user_identity_from_authorization
 from app.services.contract_service import expire_contracts_after_grace
-from app.api.v1.routes.allocation import run_test_prediction, run_daily_prediction
+from app.api.v1.routes.allocation import run_test_prediction
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理 - 启动时初始化数据库"""
-    setup_logging()
     logger = get_logger("app.lifespan")
+    if settings.jwt_secret.strip() in {"", "change-me"}:
+        logger.warning(
+            "JWT_SECRET 未配置或为默认值，生产环境请务必设置强随机密钥并妥善保管"
+        )
     print("正在检查数据库初始化...")
     try:
         create_tables()
@@ -71,15 +74,7 @@ async def lifespan(app: FastAPI):
         id="expire_contracts",
         replace_existing=True,
     )
-    # # 添加每日预测任务（凌晨1点执行）
-    # scheduler.add_job(
-    #     func=run_daily_prediction,
-    #     trigger=CronTrigger(hour=1, minute=0),
-    #     kwargs={"H": 10},
-    #     id="daily_prediction",
-    #     replace_existing=True,
-    # )
-        # 添加每日测试预测任务（凌晨1点执行）
+    # 每日凌晨 1 点：测试预测（run_daily_prediction 可按需改回正式任务）
     scheduler.add_job(
         func=run_test_prediction,
         trigger=CronTrigger(hour=1, minute=0),
@@ -196,12 +191,18 @@ def health_check() -> dict:
 
 @app.get("/init-db")
 def manual_init_db():
-    """手动触发数据库初始化（调试用）"""
+    """手动触发数据库初始化（默认关闭，需设置 ENABLE_MANUAL_DB_INIT=1）。"""
+    if not settings.enable_manual_db_init:
+        raise HTTPException(status_code=404, detail="Not Found")
     try:
         create_tables()
         return {"success": True, "message": "数据库初始化完成"}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        logger.exception("manual_init_db failed")
+        raise HTTPException(
+            status_code=500,
+            detail="数据库初始化失败",
+        ) from e
 
 
 if __name__ == "__main__":

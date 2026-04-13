@@ -84,6 +84,7 @@ def load_settings() -> "Settings":
         openai_input_price_per_1k=_env_float("OPENAI_INPUT_PRICE_PER_1K", 0.005),
         openai_output_price_per_1k=_env_float("OPENAI_OUTPUT_PRICE_PER_1K", 0.015),
         prediction_prometheus_enabled=_env_bool("PREDICTION_PROMETHEUS_INSTRUMENTATOR", False),
+        enable_manual_db_init=_env_bool("ENABLE_MANUAL_DB_INIT", False),
     )
 
 
@@ -118,6 +119,8 @@ class Settings(BaseModel):
     openai_input_price_per_1k: float = 0.005
     openai_output_price_per_1k: float = 0.015
     prediction_prometheus_enabled: bool = False
+    # 为 true 时开放 GET /init-db（默认关闭，避免公网误暴露建表能力）
+    enable_manual_db_init: bool = False
 
 
 settings = load_settings()
