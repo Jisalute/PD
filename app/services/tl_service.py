@@ -1805,48 +1805,94 @@ class TLService:
         self,
         category_id: int,
         names: List[str],
+        *,
+        append_aliases_only: bool = False,
     ) -> Dict[str, Any]:
         if not names:
+            raise ValueError("品类名称列表不能为空")
+
+        cleaned = [str(n).strip() for n in names if str(n).strip()]
+        if not cleaned:
             raise ValueError("品类名称列表不能为空")
 
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    if category_id <= 0:
+                    if append_aliases_only:
+                        if category_id <= 0:
+                            raise ValueError("仅追加别名时品类id须为已存在的分组ID")
                         cur.execute(
-                            "SELECT COALESCE(MAX(category_id), 0) + 1 FROM dict_categories"
+                            "SELECT 1 FROM dict_categories WHERE category_id = %s AND is_active = 1 LIMIT 1",
+                            (category_id,),
                         )
-                        category_id = int(cur.fetchone()[0])
-
-                    # 将该 category_id 下所有旧记录的 is_main 置为 0
-                    cur.execute(
-                        "UPDATE dict_categories SET is_main = 0 WHERE category_id = %s",
-                        (category_id,),
-                    )
-
-                    for i, name in enumerate(names):
-                        is_main = 1 if i == 0 else 0
-
+                        if not cur.fetchone():
+                            raise ValueError(f"品类id {category_id} 不存在，无法仅追加别名")
                         cur.execute(
-                            "SELECT row_id, category_id FROM dict_categories WHERE name = %s",
-                            (name,),
+                            "SELECT name FROM dict_categories "
+                            "WHERE category_id = %s AND is_main = 1 AND is_active = 1 LIMIT 1",
+                            (category_id,),
                         )
-                        existing = cur.fetchone()
+                        main_row = cur.fetchone()
+                        main_name = str(main_row[0]).strip() if main_row and main_row[0] else None
 
-                        if existing:
+                        for name in cleaned:
+                            if main_name and name == main_name:
+                                continue
                             cur.execute(
-                                "UPDATE dict_categories "
-                                "SET category_id = %s, is_main = %s, is_active = 1 "
-                                "WHERE row_id = %s",
-                                (category_id, is_main, existing[0]),
+                                "SELECT row_id, category_id FROM dict_categories WHERE name = %s",
+                                (name,),
                             )
-                        else:
+                            existing = cur.fetchone()
+                            if existing:
+                                cur.execute(
+                                    "UPDATE dict_categories "
+                                    "SET category_id = %s, is_main = 0, is_active = 1 "
+                                    "WHERE row_id = %s",
+                                    (category_id, existing[0]),
+                                )
+                            else:
+                                cur.execute(
+                                    "INSERT INTO dict_categories "
+                                    "(category_id, name, is_main, is_active) "
+                                    "VALUES (%s, %s, 0, 1)",
+                                    (category_id, name),
+                                )
+                    else:
+                        if category_id <= 0:
                             cur.execute(
-                                "INSERT INTO dict_categories "
-                                "(category_id, name, is_main, is_active) "
-                                "VALUES (%s, %s, %s, 1)",
-                                (category_id, name, is_main),
+                                "SELECT COALESCE(MAX(category_id), 0) + 1 FROM dict_categories"
                             )
+                            category_id = int(cur.fetchone()[0])
+
+                        # 将该 category_id 下所有旧记录的 is_main 置为 0
+                        cur.execute(
+                            "UPDATE dict_categories SET is_main = 0 WHERE category_id = %s",
+                            (category_id,),
+                        )
+
+                        for i, name in enumerate(cleaned):
+                            is_main = 1 if i == 0 else 0
+
+                            cur.execute(
+                                "SELECT row_id, category_id FROM dict_categories WHERE name = %s",
+                                (name,),
+                            )
+                            existing = cur.fetchone()
+
+                            if existing:
+                                cur.execute(
+                                    "UPDATE dict_categories "
+                                    "SET category_id = %s, is_main = %s, is_active = 1 "
+                                    "WHERE row_id = %s",
+                                    (category_id, is_main, existing[0]),
+                                )
+                            else:
+                                cur.execute(
+                                    "INSERT INTO dict_categories "
+                                    "(category_id, name, is_main, is_active) "
+                                    "VALUES (%s, %s, %s, 1)",
+                                    (category_id, name, is_main),
+                                )
 
             return {
                 "code": 200,

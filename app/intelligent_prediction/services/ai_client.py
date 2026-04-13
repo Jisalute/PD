@@ -45,16 +45,26 @@ class AIModelClient:
         headers: dict[str, str],
         payload: dict[str, Any],
     ) -> tuple[int, dict[str, Any] | str]:
-        """执行 POST 并返回 (status, json|error_text)。"""
-        async with session.post(url, headers=headers, json=payload) as resp:
-            text = await resp.text()
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                return resp.status, text[:2000]
-            if not isinstance(data, dict):
-                return resp.status, text[:2000]
-            return resp.status, data
+        """执行 POST 并返回 (status, json|error_text)。
+
+        status==0 且 data 为 str：未拿到有效 HTTP 响应（超时、连接失败等），供上层切换下一供应商。
+        """
+        try:
+            async with session.post(url, headers=headers, json=payload) as resp:
+                text = await resp.text()
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError:
+                    return resp.status, text[:2000]
+                if not isinstance(data, dict):
+                    return resp.status, text[:2000]
+                return resp.status, data
+        except asyncio.TimeoutError:
+            logger.info("ai http timeout url=%s", url)
+            return 0, "timeout"
+        except aiohttp.ClientError as e:
+            logger.info("ai http client_error url=%s err=%s", url, e)
+            return 0, f"client_error:{e}"
 
     async def _call_openai_compatible(
         self,
@@ -80,6 +90,15 @@ class AIModelClient:
             body["response_format"] = {"type": "json_object"}
         status, data = await self._post_json(session, url, headers, body)
         latency_ms = (time.perf_counter() - t0) * 1000.0
+        if status == 0:
+            err = str(data)
+            logger.info(
+                "ai_call provider=openai model=%s latency_ms=%.2f cost_usd=None err=%s",
+                model,
+                latency_ms,
+                err[:200],
+            )
+            return None, "openai", latency_ms, None, "", err
         if status >= 400:
             err = str(data) if isinstance(data, str) else json.dumps(data, ensure_ascii=False)[:500]
             logger.info(
@@ -132,6 +151,15 @@ class AIModelClient:
         t0 = time.perf_counter()
         status, data = await self._post_json(session, url, headers, payload)
         latency_ms = (time.perf_counter() - t0) * 1000.0
+        if status == 0:
+            err = str(data)
+            logger.info(
+                "ai_call provider=anthropic model=%s latency_ms=%.2f cost_usd=None err=%s",
+                settings.anthropic_model,
+                latency_ms,
+                err[:200],
+            )
+            return None, "anthropic", latency_ms, None, "", err
         if status >= 400:
             err = str(data) if isinstance(data, str) else json.dumps(data, ensure_ascii=False)[:500]
             logger.info(

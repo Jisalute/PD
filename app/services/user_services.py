@@ -169,6 +169,7 @@ class AuthService:
         if email and not validate_email(email):
             raise ValueError("邮箱格式错误")
         
+        role = str(role).strip()
         if role not in UserRole.VALID_ROLES:
             raise ValueError(f"无效的角色: {role}")
         
@@ -277,6 +278,8 @@ class AuthService:
             raise ValueError("手机号格式错误")
         if "email" in updates and updates["email"] and not validate_email(updates["email"]):
             raise ValueError("邮箱格式错误")
+        if "role" in updates and updates["role"] is not None:
+            updates["role"] = str(updates["role"]).strip()
         if "role" in updates and updates["role"] not in UserRole.VALID_ROLES:
             raise ValueError("无效的角色")
         

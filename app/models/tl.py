@@ -119,13 +119,21 @@ class UpdateFreightRequest(BaseModel):
 class CategoryMappingItem(BaseModel):
     """接口7 单条品类映射"""
     品类id: int = Field(..., description="品类分组ID")
-    品类名称: List[str] = Field(..., description="品类名称列表，第一个为主名称")
+    品类名称: List[str] = Field(..., description="品类名称列表，第一个为主名称（全量更新时）")
+    仅追加别名: bool = Field(
+        False,
+        description=(
+            "为 true 时：`品类名称` 中**仅填写待追加的别名**（不要放主名称）；"
+            "不会重置该品类下 is_main、不会新建主名称行；若误传与当前主名称相同的字符串会自动跳过。"
+        ),
+    )
 
 
 class UpdateCategoryMappingRequest(BaseModel):
-    """接口7 请求体"""
+    """接口7 请求体（与 CategoryMappingItem 一致时可单独使用）"""
     品类id: int = Field(..., description="品类分组ID")
-    品类名称: List[str] = Field(..., description="品类名称列表，第一个为主名称")
+    品类名称: List[str] = Field(..., description="品类名称列表，第一个为主名称（全量更新时）")
+    仅追加别名: bool = Field(False, description="同 CategoryMappingItem.仅追加别名")
 
 
 class VlmPriceRow(BaseModel):
