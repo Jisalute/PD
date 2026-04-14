@@ -619,6 +619,11 @@ class HistoryService:
         res = await session.execute(stmt)
         return int(res.rowcount or 0)
 
+    async def purge_all_delivery_records(self, session: AsyncSession) -> int:
+        """删除送货历史表全部行（慎用）。"""
+        res = await session.execute(delete(DeliveryRecord))
+        return int(res.rowcount or 0)
+
 
 def get_history_service() -> HistoryService:
     return HistoryService()

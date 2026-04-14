@@ -100,6 +100,9 @@ def load_settings() -> "Settings":
             "INTELLIGENT_PREDICTION_SCHEDULE_CRON_MINUTE", 30
         ),
         enable_manual_db_init=_env_bool("ENABLE_MANUAL_DB_INIT", False),
+        intelligent_prediction_history_purge_secret=(
+            os.getenv("INTELLIGENT_PREDICTION_HISTORY_PURGE_SECRET") or ""
+        ).strip(),
     )
 
 
@@ -142,6 +145,8 @@ class Settings(BaseModel):
     intelligent_prediction_schedule_max_items: int = 50
     intelligent_prediction_schedule_cron_hour: int = 2
     intelligent_prediction_schedule_cron_minute: int = 30
+    #: 非空时开放 POST /送货历史/清除全部；请求头 X-Purge-Delivery-History-Secret 须与此一致
+    intelligent_prediction_history_purge_secret: str = ""
 
 
 settings = load_settings()
