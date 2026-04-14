@@ -128,6 +128,48 @@ def _ensure_contract_delivery_plan_id_column() -> None:
         logger.warning("ensure_contract_delivery_plan_id_column: %s", e)
 
 
+def _validate_contract_qty_vs_planned_tonnage(
+    delivery_plan_id: Optional[int],
+    total_quantity: Any,
+) -> Optional[str]:
+    """
+    已关联报货计划且录入了合同总吨数时：合同吨数不得大于该计划的计划吨数。
+    计划吨数为 0 或未设置时不校验（避免尚未维护计划吨数时无法保存合同）。
+    """
+    if delivery_plan_id is None or total_quantity is None:
+        return None
+    try:
+        qty_dec = Decimal(str(total_quantity))
+    except Exception:
+        return None
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT planned_tonnage FROM pd_delivery_plans WHERE id = %s",
+                    (delivery_plan_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return "关联的报货计划不存在"
+        planned = row[0] if not isinstance(row, dict) else row.get("planned_tonnage")
+        if planned is None:
+            return None
+        planned_dec = Decimal(str(planned))
+    except Exception as e:
+        logger.warning("validate contract tonnage vs plan failed: %s", e)
+        return None
+    if planned_dec <= 0:
+        return None
+    qty_q = qty_dec.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    planned_q = planned_dec.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    if qty_q > planned_q:
+        return (
+            f"合同吨数（{qty_q} 吨）不能大于报货计划计划吨数（{planned_q} 吨）"
+        )
+    return None
+
+
 # ============ 核心服务 ============
 
 class ContractService:
@@ -659,6 +701,12 @@ class ContractService:
             data["delivery_plan_id"] = pid
             data.pop("plan_no", None)
 
+            ton_err = _validate_contract_qty_vs_planned_tonnage(
+                data.get("delivery_plan_id"), data.get("total_quantity")
+            )
+            if ton_err:
+                return {"success": False, "error": ton_err}
+
             # 检查合同编号是否已存在（包括已删除的）
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -775,13 +823,50 @@ class ContractService:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     # 获取原合同信息（包括图片路径和合同号）
-                    cur.execute("SELECT contract_no, contract_image_path, contract_date, end_date, status FROM pd_contracts WHERE id = %s",
-                                (contract_id,))
+                    cur.execute(
+                        """
+                        SELECT contract_no, contract_image_path, contract_date, end_date, status,
+                               delivery_plan_id, total_quantity
+                        FROM pd_contracts WHERE id = %s
+                        """,
+                        (contract_id,),
+                    )
                     old = cur.fetchone()
                     if not old:
                         return {"success": False, "error": f"合同ID {contract_id} 不存在"}
 
-                    old_contract_no, old_image_path, old_contract_date, old_end_date, old_status = old
+                    if isinstance(old, dict):
+                        old_contract_no = old["contract_no"]
+                        old_image_path = old["contract_image_path"]
+                        old_contract_date = old["contract_date"]
+                        old_end_date = old["end_date"]
+                        old_status = old["status"]
+                        old_delivery_plan_id = old.get("delivery_plan_id")
+                        old_total_quantity = old.get("total_quantity")
+                    else:
+                        (
+                            old_contract_no,
+                            old_image_path,
+                            old_contract_date,
+                            old_end_date,
+                            old_status,
+                            old_delivery_plan_id,
+                            old_total_quantity,
+                        ) = old
+
+                    eff_dpid = (
+                        data["delivery_plan_id"]
+                        if "delivery_plan_id" in data
+                        else old_delivery_plan_id
+                    )
+                    eff_qty = (
+                        data["total_quantity"]
+                        if "total_quantity" in data
+                        else old_total_quantity
+                    )
+                    ton_err = _validate_contract_qty_vs_planned_tonnage(eff_dpid, eff_qty)
+                    if ton_err:
+                        return {"success": False, "error": ton_err}
 
                     # 如果要修改合同编号，检查新编号是否被占用
                     new_contract_no = data.get("contract_no")
