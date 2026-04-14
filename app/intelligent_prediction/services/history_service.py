@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -27,6 +28,10 @@ from app.intelligent_prediction.schemas.history import (
 )
 
 logger = get_logger(__name__)
+
+# 送货日期：年-月-日 或 年/月/日（月日可一位数）；与 Excel 序列日互不冲突的数值范围
+_DATE_YMD_SEP = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:\s|$)")
+_EXCEL_SERIAL_MAX = 200_000  # 约到 2448 年，覆盖正常业务日期列
 
 
 class HistoryService:
@@ -107,12 +112,31 @@ class HistoryService:
             return value.date(), None
         if isinstance(value, date):
             return value, None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            num = float(value)
+            if 1.0 <= num <= float(_EXCEL_SERIAL_MAX) and abs(num - round(num)) < 1e-9:
+                try:
+                    from openpyxl.utils.datetime import from_excel
+
+                    dt = from_excel(num)
+                    if isinstance(dt, datetime):
+                        return dt.date(), None
+                except (ValueError, OverflowError, TypeError):
+                    pass
         s = str(value).strip()
         if not s:
             return None, "empty_date"
+        head = s.split()[0] if " " in s else s
+        m = _DATE_YMD_SEP.match(head)
+        if m:
+            y, mo, da = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                return date(y, mo, da), None
+            except ValueError:
+                return None, f"invalid_calendar_date:{s[:80]}"
         parsed = pd.to_datetime(s, errors="coerce", dayfirst=False)
         if pd.isna(parsed):
-            return None, f"unrecognized_date:{s}"
+            return None, f"unrecognized_date:{s[:80]}"
         ts = parsed.to_pydatetime()
         return ts.date(), None
 
