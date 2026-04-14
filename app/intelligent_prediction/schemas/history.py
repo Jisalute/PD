@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -101,6 +101,12 @@ class HistoryBatchDeleteRequest(BaseModel):
     def unique_ids(cls, v: list[int]) -> list[int]:
         """去重。"""
         return list(dict.fromkeys(v))
+
+
+class HistoryPurgeAllRequest(BaseModel):
+    """一键清除全部送货历史：须显式确认。"""
+
+    confirm: Literal[True] = Field(..., description="必须为 JSON 布尔 true")
 
 
 class HistoryQueryParams(BaseModel):

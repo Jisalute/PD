@@ -5,12 +5,13 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import (
     BusinessException,
     INTERNAL_SERVER_ERROR_MESSAGE,
@@ -24,6 +25,7 @@ from app.intelligent_prediction.schemas.history import (
     DeliveryRecordUpdate,
     HistoryBatchDeleteRequest,
     HistoryImportResponse,
+    HistoryPurgeAllRequest,
     HistoryListResponse,
     HistoryQueryParams,
     HistoryStatsResponse,
@@ -323,4 +325,53 @@ async def batch_delete_history(
         raise
     except Exception as e:
         logger.exception("batch_delete failed")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
+
+
+@router.post(
+    "/清除全部",
+    summary="一键清除全部送货历史",
+    description=(
+        "删除表 pd_ip_delivery_records 全部行。须先在环境变量配置 INTELLIGENT_PREDICTION_HISTORY_PURGE_SECRET；"
+        "请求头 X-Purge-Delivery-History-Secret 与该值完全一致，且 JSON 体 {\"confirm\": true}。"
+    ),
+)
+async def purge_all_delivery_history(
+    body: HistoryPurgeAllRequest,
+    session: AsyncSession = Depends(get_prediction_db_session),
+    svc: HistoryService = Depends(get_history_service_dep),
+    actor: AuditActor = Depends(get_audit_actor),
+    x_purge_delivery_history_secret: Annotated[
+        Optional[str],
+        Header(alias="X-Purge-Delivery-History-Secret"),
+    ] = None,
+) -> dict[str, int]:
+    configured = (settings.intelligent_prediction_history_purge_secret or "").strip()
+    if not configured:
+        raise BusinessException(
+            "未配置 INTELLIGENT_PREDICTION_HISTORY_PURGE_SECRET，一键清除接口不可用",
+            code="FEATURE_DISABLED",
+            status_code=503,
+        )
+    if (x_purge_delivery_history_secret or "").strip() != configured:
+        raise BusinessException("清除密钥无效", code="FORBIDDEN", status_code=403)
+    try:
+        deleted = await svc.purge_all_delivery_records(session)
+        await append_audit(
+            session,
+            "history_purge_all",
+            resource="pd_ip_delivery_records",
+            detail={"deleted": deleted},
+            actor=actor,
+        )
+        logger.warning(
+            "history purge_all completed deleted=%s actor=%s",
+            deleted,
+            actor.user_label,
+        )
+        return {"deleted": deleted}
+    except BusinessException:
+        raise
+    except Exception as e:
+        logger.exception("purge_all failed")
         raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
